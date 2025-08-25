@@ -1,6 +1,57 @@
-[build-system]
-requires = [
-    "setuptools>=61.0",  
+
+[project]
+name = "SAM-2"
+version = "1.0"
+description = "SAM 2: Segment Anything in Images and Videos"
+authors = [
+    {name = "Meta AI", email = "segment-anything@meta.com"},
+]
+dependencies = [
+    "hydra-core>=1.3.2",
+    "iopath>=0.1.10",
+    "numpy>=1.24.4",
+    "pillow>=9.4.0",
     "torch>=2.5.1",
-    ]
-build-backend = "setuptools.build_meta"
+    "torchvision>=0.20.1",
+    "tqdm>=4.66.1",
+]
+requires-python = ">=3.10.0"
+readme = "README.md"
+license = {text = "Apache 2.0"}
+
+[project.urls]
+Homepage = "https://github.com/facebookresearch/sam2"
+
+[project.optional-dependencies]
+notebooks = [
+    "eva-decord>=0.6.1",
+    "jupyter>=1.0.0",
+    "matplotlib>=3.9.1",
+    "opencv-python>=4.7.0",
+]
+interactive-demo = [
+    "Flask-Cors>=5.0.0",
+    "Flask>=3.0.3",
+    "av>=13.0.0",
+    "dataclasses-json>=0.6.7",
+    "eva-decord>=0.6.1",
+    "gunicorn>=23.0.0",
+    "imagesize>=1.4.1",
+    "pycocotools>=2.0.8",
+    "strawberry-graphql>=0.243.0",
+]
+dev = [
+    "black==24.2.0",
+    "fvcore>=0.1.5.post20221221",
+    "opencv-python>=4.7.0",
+    "pandas>=2.2.2",
+    "pycocotools>=2.0.8",
+    "scikit-image>=0.24.0",
+    "submitit>=1.5.1",
+    "tensorboard>=2.17.0",
+    "tensordict>=0.6.0",
+    "ufmt==2.0.0b2",
+    "usort==1.0.2",
+]
+[tool.pdm]
+distribution = false

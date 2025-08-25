@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import pandas as pd
+import numpy as np
 
 import torch
 
@@ -58,6 +59,8 @@ class PNGRawDataset(VOSRawDataset):
         self,
         img_folder,
         gt_folder,
+        split="train",
+        val_ratio=0.1,
         file_list_txt=None,
         excluded_videos_list_txt=None,
         sample_rate=1,
@@ -68,6 +71,8 @@ class PNGRawDataset(VOSRawDataset):
     ):
         self.img_folder = img_folder
         self.gt_folder = gt_folder
+        self.split = split
+        self.val_ratio = val_ratio
         self.sample_rate = sample_rate
         self.is_palette = is_palette
         self.single_object_mode = single_object_mode
@@ -76,9 +81,25 @@ class PNGRawDataset(VOSRawDataset):
         # Read the subset defined in file_list_txt
         if file_list_txt is not None:
             with g_pathmgr.open(file_list_txt, "r") as f:
-                subset = [os.path.splitext(line.strip())[0] for line in f]
+                self.sequences = [os.path.splitext(line.strip())[0] for line in f]
         else:
-            subset = os.listdir(self.img_folder)
+            self.sequences = os.listdir(self.img_folder)
+
+        num_sequences = len(self.sequences)
+        
+        # Convert to numpy array for easier indexing
+        self.sequences = np.array(self.sequences)
+
+        # Only create train/val split if not in train_only mode
+        if self.split != "train_only":
+            num_val = int(num_sequences * self.val_ratio) 
+            rng = np.random.RandomState(42)
+            sequence_indices = rng.permutation(num_sequences)
+            
+            if self.split == "train":
+                self.sequences = self.sequences[sequence_indices[:-num_val]]
+            elif self.split == "val":
+                self.sequences = self.sequences[sequence_indices[-num_val:]]
 
         # Read and process excluded files if provided
         if excluded_videos_list_txt is not None:
@@ -89,7 +110,7 @@ class PNGRawDataset(VOSRawDataset):
 
         # Check if it's not in excluded_files
         self.video_names = sorted(
-            [video_name for video_name in subset if video_name not in excluded_files]
+            [video_name for video_name in self.sequences if video_name not in excluded_files]
         )
 
         if self.single_object_mode:

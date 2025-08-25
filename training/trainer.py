@@ -13,9 +13,10 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
+from pathlib import Path
 
 import numpy as np
-
+import threading
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -235,6 +236,7 @@ class Trainer:
         self.start_time = time.time()
         self.ckpt_time_elapsed = 0
         self.est_epoch_time = dict.fromkeys([Phase.TRAIN, Phase.VAL], 0)
+        self.current_val_loss = None  # For tracking validation loss for checkpointing
 
     def _get_meters(self, phase_filters=None):
         if self.meters is None:
@@ -323,7 +325,23 @@ class Trainer:
 
     def save_checkpoint(self, epoch, checkpoint_names=None):
         checkpoint_folder = self.checkpoint_conf.save_dir
-        makedir(checkpoint_folder)
+        # Clean up old checkpoints in background thread to prevent stalling
+        if g_pathmgr.exists(checkpoint_folder):
+            def cleanup_old_checkpoints():
+                try:
+                    for file in Path(checkpoint_folder).glob("*.pt"):
+                        file.unlink()
+                    logging.info(f"Cleaned up old checkpoint directory: {checkpoint_folder}")
+                except Exception as e:
+                    logging.warning(f"Failed to clean checkpoint directory {checkpoint_folder}: {e}")
+            
+            cleanup_thread = threading.Thread(target=cleanup_old_checkpoints, daemon=True)
+            cleanup_thread.start()
+            cleanup_thread.join()
+        else:
+            makedir(checkpoint_folder)
+        
+
         if checkpoint_names is None:
             checkpoint_names = ["checkpoint"]
             if (
@@ -541,7 +559,8 @@ class Trainer:
                     f.write(json.dumps(outs) + "\n")
 
             # Save checkpoint before validating
-            self.save_checkpoint(self.epoch + 1)
+            # Only save checkpoint if the val loss is the best so far
+            #self.save_checkpoint(self.epoch + 1)
 
             del dataloader
             gc.collect()
@@ -686,6 +705,11 @@ class Trainer:
             out_dict[k] = v.avg
         for k, v in extra_loss_mts.items():
             out_dict[k] = v.avg
+
+        # Capture validation loss for checkpoint saving
+        if Phase.VAL in curr_phases and "Losses/val_val_loss" in out_dict:
+            self.current_val_loss = out_dict["Losses/val_val_loss"]
+            logging.info(f"Captured validation loss for checkpointing: {self.current_val_loss:.4f}")
 
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
@@ -914,6 +938,32 @@ class Trainer:
                         and key in self.checkpoint_conf.save_best_meters
                     ):
                         checkpoint_save_keys.append(tracked_meter_key.replace("/", "_"))
+
+        # Alternative: Direct validation loss checkpointing without meters
+        if Phase.VAL in phases and self.checkpoint_conf.save_best_meters is not None:
+            # Check if we should save based on validation loss
+            # This will be called after validation epoch with the validation results
+            if hasattr(self, 'current_val_loss') and self.current_val_loss is not None:
+                val_loss_key = "Losses/val_val_loss"
+                
+                # Check if this is better than previous best
+                if val_loss_key not in self.best_meter_values or self.current_val_loss < self.best_meter_values[val_loss_key]:
+                    logging.info(f"New best validation loss: {self.current_val_loss:.4f} (previous: {self.best_meter_values.get(val_loss_key, 'N/A')})")
+                    self.best_meter_values[val_loss_key] = self.current_val_loss
+                    
+                    # Save checkpoint
+                    checkpoint_name = f"checkpoint_epoch_{self.epoch:04d}"
+                    self.save_checkpoint(self.epoch + 1, [checkpoint_name])
+                    logging.info(f"Saved best validation checkpoint: {checkpoint_name}")
+                else:
+                    logging.info(f"Validation loss {self.current_val_loss:.4f} not better than previous best {self.best_meter_values.get(val_loss_key, 'N/A')}")
+                
+                # Reset current validation loss
+                self.current_val_loss = None
+            else:
+                logging.info("No current validation loss captured for checkpointing")
+        else:
+            logging.info(f"Validation checkpointing conditions not met: Phase.VAL in phases={Phase.VAL in phases}, save_best_meters={self.checkpoint_conf.save_best_meters}")
 
         if len(checkpoint_save_keys) > 0:
             self.save_checkpoint(self.epoch + 1, checkpoint_save_keys)

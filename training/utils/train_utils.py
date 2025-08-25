@@ -158,11 +158,19 @@ def log_env_variables():
 class AverageMeter:
     """Computes and stores the average and current value"""
 
-    def __init__(self, name, device, fmt=":f"):
+    def __init__(self, name, device, fmt=":f", better_is_lower=True):
         self.name = name
         self.fmt = fmt
         self.device = device
+        self.better_is_lower = better_is_lower
+        self.best_val = float("inf") if better_is_lower else float("-inf")
         self.reset()
+
+    def is_better(self, new_val, old_val):
+        if self.better_is_lower:
+            return new_val < old_val
+        else:
+            return new_val > old_val
 
     def reset(self):
         self.val = 0
