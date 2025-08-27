@@ -9,6 +9,8 @@ import json
 import logging
 import math
 import os
+import signal
+import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -183,6 +185,10 @@ class Trainer:
         distributed = DistributedConf(**distributed or {})
         cuda = CudaConf(**cuda or {})
         self.where = 0.0
+        self.no_improvement_count = 0
+        self.stop_training = False
+        self.best_checkpoint_path = None  
+        self.best_val_loss = float('inf')
 
         self._infer_distributed_backend_if_none(distributed, accelerator)
 
@@ -325,20 +331,9 @@ class Trainer:
 
     def save_checkpoint(self, epoch, checkpoint_names=None):
         checkpoint_folder = self.checkpoint_conf.save_dir
-        # Clean up old checkpoints in background thread to prevent stalling
-        if g_pathmgr.exists(checkpoint_folder):
-            def cleanup_old_checkpoints():
-                try:
-                    for file in Path(checkpoint_folder).glob("*.pt"):
-                        file.unlink()
-                    logging.info(f"Cleaned up old checkpoint directory: {checkpoint_folder}")
-                except Exception as e:
-                    logging.warning(f"Failed to clean checkpoint directory {checkpoint_folder}: {e}")
-            
-            cleanup_thread = threading.Thread(target=cleanup_old_checkpoints, daemon=True)
-            cleanup_thread.start()
-            cleanup_thread.join()
-        else:
+        
+        # Ensure checkpoint directory exists
+        if not g_pathmgr.exists(checkpoint_folder):
             makedir(checkpoint_folder)
         
 
@@ -367,6 +362,7 @@ class Trainer:
             "steps": self.steps,
             "time_elapsed": self.time_elapsed_meter.val,
             "best_meter_values": self.best_meter_values,
+            "best_checkpoint_path": self.best_checkpoint_path,
         }
         if self.optim_conf.amp.enabled:
             checkpoint["scaler"] = self.scaler.state_dict()
@@ -375,8 +371,12 @@ class Trainer:
         if self.distributed_rank != 0:
             return
 
+        logging.info(f"Saving {len(checkpoint_paths)} checkpoint(s) for epoch {epoch}")
         for checkpoint_path in checkpoint_paths:
+            logging.info(f"Saving checkpoint to: {checkpoint_path}")
             self._save_checkpoint(checkpoint, checkpoint_path)
+            logging.info(f"Successfully saved checkpoint: {checkpoint_path}")
+        
 
     def _save_checkpoint(self, checkpoint, checkpoint_path):
         """
@@ -390,6 +390,13 @@ class Trainer:
         checkpoint_path_tmp = f"{checkpoint_path}.tmp"
         with g_pathmgr.open(checkpoint_path_tmp, "wb") as f:
             torch.save(checkpoint, f)
+            f.flush()
+            if hasattr(os, 'sync'):
+                os.sync()
+            elif hasattr(os, 'fsync'):
+                os.fsync(f.fileno())
+            else:
+                logging.warning("No sync method available for this platform")
         # after torch.save is completed, replace the old checkpoint with the new one
         if g_pathmgr.exists(checkpoint_path):
             # remove the old checkpoint_path file first (otherwise g_pathmgr.mv fails)
@@ -458,6 +465,7 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint["scaler"])
 
         self.best_meter_values = checkpoint.get("best_meter_values", {})
+        self.best_checkpoint_path = checkpoint.get("best_checkpoint_path", None)
 
         if "train_dataset" in checkpoint and self.train_dataset is not None:
             self.train_dataset.load_checkpoint_state(checkpoint["train_dataset"])
@@ -514,6 +522,26 @@ class Trainer:
 
         return ret_tuple
 
+    def _terminate_training_job(self, reason="Training completed"):
+        """Terminate the training job by canceling the SLURM job"""
+        logging.info(f"{reason}. Initiating SLURM job cancellation.")
+        
+        # Flush output streams
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        # Cancel the SLURM job
+        self._cancel_slurm_job()
+
+    def _cancel_slurm_job(self):
+        """Cancel the SLURM job if possible"""
+        slurm_job_id = os.environ.get('SLURM_JOB_ID')
+        if slurm_job_id:
+            logging.warning(f"Attempting to cancel SLURM job {slurm_job_id}")
+            os.system(f"scancel {slurm_job_id}")
+        else:
+            logging.warning("SLURM_JOB_ID not found. Unable to cancel SLURM job.")
+
     def run(self):
         assert self.mode in ["train", "train_only", "val"]
         if self.mode == "train":
@@ -526,11 +554,13 @@ class Trainer:
                     self.run_val()
                     self.epoch += 1
             self.run_train()
-            self.run_val()
+            if not self.stop_training:
+                self.run_val()
         elif self.mode == "val":
             self.run_val()
         elif self.mode == "train_only":
             self.run_train()
+        
 
     def _setup_dataloaders(self):
         self.train_dataset = None
@@ -544,7 +574,7 @@ class Trainer:
 
     def run_train(self):
 
-        while self.epoch < self.max_epochs:
+        while self.epoch < self.max_epochs and not self.stop_training:
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
             barrier()
             outs = self.train_epoch(dataloader)
@@ -558,18 +588,12 @@ class Trainer:
                 ) as f:
                     f.write(json.dumps(outs) + "\n")
 
-            # Save checkpoint before validating
-            # Only save checkpoint if the val loss is the best so far
-            #self.save_checkpoint(self.epoch + 1)
-
             del dataloader
             gc.collect()
 
-            # Run val, not running on last epoch since will run after the
-            # loop anyway
             if self.is_intermediate_val_epoch(self.epoch):
                 self.run_val()
-
+                
             if self.distributed_rank == 0:
                 self.best_meter_values.update(self._get_trainer_state("train"))
                 with g_pathmgr.open(
@@ -577,6 +601,10 @@ class Trainer:
                     "a",
                 ) as f:
                     f.write(json.dumps(self.best_meter_values) + "\n")
+
+            if self.stop_training and self.distributed_rank == 0:
+                logging.info(f"Early stopping triggered at epoch {self.epoch}")
+                self._terminate_training_job(f"Early stopping triggered at epoch {self.epoch}")
 
             self.epoch += 1
         # epoch was incremented in the loop but the val step runs out of the loop
@@ -699,6 +727,7 @@ class Trainer:
             if hasattr(unwrap_ddp_if_wrapped(model), "on_validation_epoch_end"):
                 unwrap_ddp_if_wrapped(model).on_validation_epoch_end()
 
+
         out_dict = self._log_meters_and_save_best_ckpts(curr_phases)
 
         for k, v in loss_mts.items():
@@ -706,10 +735,50 @@ class Trainer:
         for k, v in extra_loss_mts.items():
             out_dict[k] = v.avg
 
-        # Capture validation loss for checkpoint saving
-        if Phase.VAL in curr_phases and "Losses/val_val_loss" in out_dict:
-            self.current_val_loss = out_dict["Losses/val_val_loss"]
-            logging.info(f"Captured validation loss for checkpointing: {self.current_val_loss:.4f}")
+        dist.barrier()
+        if Phase.VAL in curr_phases and self.distributed_rank == 0:
+            val_loss_key = "Losses/val_val_loss"
+            if val_loss_key in out_dict:
+                current_val_loss = out_dict[val_loss_key]
+                logging.info(f"Using current epoch validation loss: {current_val_loss:.4f}")
+                
+                if current_val_loss < self.best_val_loss:
+                    logging.info(f"New best validation loss: {current_val_loss:.4f} (previous: {self.best_val_loss})")
+                    
+                    # Remove previous best checkpoint if it exists
+                    if self.best_checkpoint_path is not None and g_pathmgr.exists(self.best_checkpoint_path):
+                        try:
+                            logging.info(f"Removing previous best checkpoint: {self.best_checkpoint_path}")
+                            g_pathmgr.rm(self.best_checkpoint_path)
+                            logging.info(f"Successfully removed previous best checkpoint")
+                        except Exception as e:
+                            logging.warning(f"Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}")
+                    
+                    self.best_meter_values[val_loss_key] = current_val_loss
+                    self.best_val_loss = current_val_loss
+                    
+                    self.no_improvement_count = 0
+                    
+                    checkpoint_name = f"best_checkpoint_epoch_{self.epoch:04d}"
+                    checkpoint_path = os.path.join(self.checkpoint_conf.save_dir, f"{checkpoint_name}.pt")
+                    self.save_checkpoint(self.epoch, [checkpoint_name])
+                    
+                    # Only update best_checkpoint_path if the checkpoint was actually saved
+                    if g_pathmgr.exists(checkpoint_path):
+                        self.best_checkpoint_path = checkpoint_path  # Track the new best checkpoint
+                        logging.info(f"Saved new best validation checkpoint: {checkpoint_name}")
+                    else:
+                        logging.error(f"Failed to save best checkpoint: {checkpoint_path} does not exist after save_checkpoint call")
+                else:
+                    self.no_improvement_count += 1
+                    logging.info(f"Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}")
+                    if self.no_improvement_count >= 20:
+                        logging.info(f"No improvement for {self.no_improvement_count} epochs, stopping training")
+                        self.stop_training = True
+            else:
+                logging.info("No validation loss found in current epoch results for checkpointing")
+        else:
+            logging.info(f"No validation loss found because Phase.VAL = {Phase.VAL} or self.distributed_rank = {self.distributed_rank}")
 
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
@@ -850,6 +919,7 @@ class Trainer:
             out_dict[k] = v.avg
         for k, v in extra_loss_mts.items():
             out_dict[k] = v.avg
+        
         out_dict.update(self._get_trainer_state(phase))
         logging.info(f"Losses and meters: {out_dict}")
         self._reset_meters([phase])
@@ -915,14 +985,17 @@ class Trainer:
     def _log_meters_and_save_best_ckpts(self, phases: List[str]):
         logging.info("Synchronizing meters")
         out_dict = {}
+        for key, meter in self._get_meters(phases).items():
+            meter_output = meter.compute_synced()
+            for meter_subkey, meter_value in meter_output.items():
+                out_dict[os.path.join("Meters_train", key, meter_subkey)] = meter_value
+        
         checkpoint_save_keys = []
         for key, meter in self._get_meters(phases).items():
             meter_output = meter.compute_synced()
             is_better_check = getattr(meter, "is_better", None)
 
             for meter_subkey, meter_value in meter_output.items():
-                out_dict[os.path.join("Meters_train", key, meter_subkey)] = meter_value
-
                 if is_better_check is None:
                     continue
 
@@ -939,34 +1012,10 @@ class Trainer:
                     ):
                         checkpoint_save_keys.append(tracked_meter_key.replace("/", "_"))
 
-        # Alternative: Direct validation loss checkpointing without meters
-        if Phase.VAL in phases and self.checkpoint_conf.save_best_meters is not None:
-            # Check if we should save based on validation loss
-            # This will be called after validation epoch with the validation results
-            if hasattr(self, 'current_val_loss') and self.current_val_loss is not None:
-                val_loss_key = "Losses/val_val_loss"
-                
-                # Check if this is better than previous best
-                if val_loss_key not in self.best_meter_values or self.current_val_loss < self.best_meter_values[val_loss_key]:
-                    logging.info(f"New best validation loss: {self.current_val_loss:.4f} (previous: {self.best_meter_values.get(val_loss_key, 'N/A')})")
-                    self.best_meter_values[val_loss_key] = self.current_val_loss
-                    
-                    # Save checkpoint
-                    checkpoint_name = f"checkpoint_epoch_{self.epoch:04d}"
-                    self.save_checkpoint(self.epoch + 1, [checkpoint_name])
-                    logging.info(f"Saved best validation checkpoint: {checkpoint_name}")
-                else:
-                    logging.info(f"Validation loss {self.current_val_loss:.4f} not better than previous best {self.best_meter_values.get(val_loss_key, 'N/A')}")
-                
-                # Reset current validation loss
-                self.current_val_loss = None
-            else:
-                logging.info("No current validation loss captured for checkpointing")
-        else:
-            logging.info(f"Validation checkpointing conditions not met: Phase.VAL in phases={Phase.VAL in phases}, save_best_meters={self.checkpoint_conf.save_best_meters}")
+
 
         if len(checkpoint_save_keys) > 0:
-            self.save_checkpoint(self.epoch + 1, checkpoint_save_keys)
+            self.save_checkpoint(self.epoch, checkpoint_save_keys)
 
         return out_dict
 
