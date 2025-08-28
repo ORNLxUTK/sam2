@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import threading
+import shutil
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -387,7 +388,7 @@ class Trainer:
         logging.info(f"Saving {len(checkpoint_paths)} checkpoint(s) for epoch {epoch}")
         for checkpoint_path in checkpoint_paths:
             logging.info(f"Saving checkpoint to: {checkpoint_path}")
-            self._save_checkpoint(checkpoint, checkpoint_path, lora_path=Path(checkpoint_path).stem + "_lora" if self.LoRA.use_lora else None)
+            self._save_checkpoint(checkpoint, checkpoint_path, lora_path=Path(checkpoint_path).parent / (Path(checkpoint_path).stem + "_lora" if self.LoRA.use_lora else None))
             logging.info(f"Successfully saved checkpoint: {checkpoint_path}")
         
 
@@ -420,11 +421,7 @@ class Trainer:
         if lora_path is not None:
             lora_path_tmp = f"{lora_path}.tmp"
             
-            # Debug: check what type of model we have
-            logging.info(f"Model type before unwrapping: {type(self.model)}")
             unwrapped_model = unwrap_ddp_if_wrapped(self.model)
-            logging.info(f"Model type after unwrapping: {type(unwrapped_model)}")
-            logging.info(f"Has save_pretrained: {hasattr(unwrapped_model, 'save_pretrained')}")
             
             unwrapped_model.save_pretrained(
                 lora_path_tmp,
@@ -524,7 +521,6 @@ class Trainer:
         phase: str,
     ):
 
-        print_model_summary(model)
         outputs = model(batch)
         targets = batch.masks
         batch_size = len(batch.img_batch)
@@ -802,7 +798,7 @@ class Trainer:
                     if self.LoRA.use_lora and self.best_lora_checkpoint_path is not None and g_pathmgr.isdir(self.best_lora_checkpoint_path):
                         try:
                             logging.info(f"Removing previous best LoRA checkpoint: {self.best_lora_checkpoint_path}")
-                            g_pathmgr.rm(self.best_lora_checkpoint_path)
+                            shutil.rmtree(self.best_lora_checkpoint_path)
                             logging.info(f"Successfully removed previous best LoRA checkpoint")
                         except Exception as e:
                             logging.warning(f"Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}")
@@ -823,11 +819,11 @@ class Trainer:
                     else:
                         logging.error(f"Failed to save best checkpoint: {checkpoint_path} does not exist after save_checkpoint call")
 
-                    if self.LoRA.use_lora and g_pathmgr.isdir(str(Path(checkpoint_path).stem + "_lora")):
-                        self.best_lora_checkpoint_path = str(Path(checkpoint_path).stem + "_lora")
+                    if self.LoRA.use_lora and g_pathmgr.isdir(str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + "_lora"))):
+                        self.best_lora_checkpoint_path = str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + "_lora"))
                         logging.info(f"Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}")
                     else:
-                        logging.error(f"Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).stem + "_lora")} does not exist after save_checkpoint call")
+                        logging.error(f"Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + "_lora"))} does not exist after save_checkpoint call")
                 else:
                     self.no_improvement_count += 1
                     logging.info(f"Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}")
