@@ -24,8 +24,9 @@ import torch.distributed as dist
 import torch.nn as nn
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
-
+from peft import LoraConfig, get_peft_model, PeftModel
 from training.optimizer import construct_optimizer
+from pathlib import Path
 
 from training.utils.checkpoint_utils import (
     assert_skipped_parameters_are_frozen,
@@ -140,6 +141,13 @@ class LoggingConf:
     scalar_keys_to_log: Optional[Dict[str, Any]] = None
     log_batch_stats: bool = False
 
+@dataclass
+class LoRAConfig:
+    use_lora: bool = False
+    r: int = 4
+    use_rslora: bool = True
+    adapter_name: str = "SAM2_LoRA"
+
 
 class Trainer:
     """
@@ -155,6 +163,7 @@ class Trainer:
         model: Dict[str, Any],
         logging: Dict[str, Any],
         checkpoint: Dict[str, Any],
+        LoRA: Dict[str, Any],
         max_epochs: int,
         mode: str = "train",
         accelerator: str = "cuda",
@@ -176,6 +185,7 @@ class Trainer:
         self.model_conf = model
         self.logging_conf = LoggingConf(**logging)
         self.checkpoint_conf = CheckpointConf(**checkpoint).infer_missing()
+        self.LoRA = LoRAConfig(**LoRA)
         self.max_epochs = max_epochs
         self.mode = mode
         self.val_epoch_freq = val_epoch_freq
@@ -188,6 +198,7 @@ class Trainer:
         self.no_improvement_count = 0
         self.stop_training = False
         self.best_checkpoint_path = None  
+        self.best_lora_checkpoint_path = None
         self.best_val_loss = float('inf')
 
         self._infer_distributed_backend_if_none(distributed, accelerator)
@@ -213,12 +224,11 @@ class Trainer:
         ), "Torch distributed needs to be initialized before calling the trainer."
 
         self._setup_components()  # Except Optimizer everything is setup here.
-        self._move_to_device()
-        self._construct_optimizers()
         self._setup_dataloaders()
 
         self.time_elapsed_meter = DurationMeter("Time Elapsed", self.device, ":.2f")
 
+        # TODO: Make this section worth with or without LoRA
         if self.checkpoint_conf.resume_from is not None:
             assert os.path.exists(
                 self.checkpoint_conf.resume_from
@@ -232,6 +242,8 @@ class Trainer:
             barrier()
 
         self.load_checkpoint()
+        self._construct_optimizers()
+        self._move_to_device()
         self._setup_ddp_distributed_training(distributed, accelerator)
         barrier()
 
@@ -349,13 +361,7 @@ class Trainer:
         for ckpt_name in checkpoint_names:
             checkpoint_paths.append(os.path.join(checkpoint_folder, f"{ckpt_name}.pt"))
 
-        state_dict = unwrap_ddp_if_wrapped(self.model).state_dict()
-        state_dict = exclude_params_matching_unix_pattern(
-            patterns=self.checkpoint_conf.skip_saving_parameters, state_dict=state_dict
-        )
-
         checkpoint = {
-            "model": state_dict,
             "optimizer": self.optim.optimizer.state_dict(),
             "epoch": epoch,
             "loss": self.loss.state_dict(),
@@ -364,6 +370,13 @@ class Trainer:
             "best_meter_values": self.best_meter_values,
             "best_checkpoint_path": self.best_checkpoint_path,
         }
+
+        if not self.LoRA.use_lora:
+            state_dict = unwrap_ddp_if_wrapped(self.model).state_dict()
+            state_dict = exclude_params_matching_unix_pattern(
+                patterns=self.checkpoint_conf.skip_saving_parameters, state_dict=state_dict)    
+            checkpoint["model"] = state_dict
+    
         if self.optim_conf.amp.enabled:
             checkpoint["scaler"] = self.scaler.state_dict()
 
@@ -374,11 +387,11 @@ class Trainer:
         logging.info(f"Saving {len(checkpoint_paths)} checkpoint(s) for epoch {epoch}")
         for checkpoint_path in checkpoint_paths:
             logging.info(f"Saving checkpoint to: {checkpoint_path}")
-            self._save_checkpoint(checkpoint, checkpoint_path)
+            self._save_checkpoint(checkpoint, checkpoint_path, lora_path=Path(checkpoint_path).stem + "_lora" if self.LoRA.use_lora else None)
             logging.info(f"Successfully saved checkpoint: {checkpoint_path}")
         
 
-    def _save_checkpoint(self, checkpoint, checkpoint_path):
+    def _save_checkpoint(self, checkpoint, checkpoint_path, lora_path=None):
         """
         Save a checkpoint while guarding against the job being killed in the middle
         of checkpoint saving (which corrupts the checkpoint file and ruins the
@@ -404,8 +417,27 @@ class Trainer:
         success = g_pathmgr.mv(checkpoint_path_tmp, checkpoint_path)
         assert success
 
+        if lora_path is not None:
+            lora_path_tmp = f"{lora_path}.tmp"
+            
+            # Debug: check what type of model we have
+            logging.info(f"Model type before unwrapping: {type(self.model)}")
+            unwrapped_model = unwrap_ddp_if_wrapped(self.model)
+            logging.info(f"Model type after unwrapping: {type(unwrapped_model)}")
+            logging.info(f"Has save_pretrained: {hasattr(unwrapped_model, 'save_pretrained')}")
+            
+            unwrapped_model.save_pretrained(
+                lora_path_tmp,
+                safe_serialization=True,
+                is_main_process=(self.distributed_rank == 0)
+            )
+            if g_pathmgr.exists(lora_path):
+                g_pathmgr.rm(lora_path)
+            success = g_pathmgr.mv(lora_path_tmp, lora_path)
+            assert success
+
     def load_checkpoint(self):
-        ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir)
+        ckpt_path = get_resume_checkpoint(self.checkpoint_conf.save_dir, self.LoRA.use_lora)
         if ckpt_path is None:
             self._init_model_state()
         else:
@@ -443,17 +475,29 @@ class Trainer:
                 f"Loading pretrained checkpoint from {self.checkpoint_conf.model_weight_initializer}"
             )
             self.model = model_weight_initializer(model=self.model)
+        
+        if self.LoRA.use_lora:
+            self.model = get_peft_model(self.model, LoraConfig(
+                r=self.LoRA.r,
+                target_modules="all-linear",
+                use_rslora=self.LoRA.use_rslora,
+            ), adapter_name=self.LoRA.adapter_name)
+            print_model_summary(self.model)
 
     def _load_resuming_checkpoint(self, ckpt_path: str):
         logging.info(f"Resuming training from {ckpt_path}")
 
         with g_pathmgr.open(ckpt_path, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
-        load_state_dict_into_model(
-            model=self.model,
-            state_dict=checkpoint["model"],
-            ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
-        )
+        if not self.LoRA.use_lora:
+            load_state_dict_into_model(
+                model=self.model,
+                state_dict=checkpoint["model"],
+                ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
+            )
+        else:
+            self.model = PeftModel.from_pretrained(self.model, model_id=ckpt_path, is_trainable=True)
+            print_model_summary(self.model)
 
         self.optim.optimizer.load_state_dict(checkpoint["optimizer"])
         self.loss.load_state_dict(checkpoint["loss"], strict=True)
@@ -480,6 +524,7 @@ class Trainer:
         phase: str,
     ):
 
+        print_model_summary(model)
         outputs = model(batch)
         targets = batch.masks
         batch_size = len(batch.img_batch)
@@ -754,6 +799,14 @@ class Trainer:
                         except Exception as e:
                             logging.warning(f"Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}")
                     
+                    if self.LoRA.use_lora and self.best_lora_checkpoint_path is not None and g_pathmgr.isdir(self.best_lora_checkpoint_path):
+                        try:
+                            logging.info(f"Removing previous best LoRA checkpoint: {self.best_lora_checkpoint_path}")
+                            g_pathmgr.rm(self.best_lora_checkpoint_path)
+                            logging.info(f"Successfully removed previous best LoRA checkpoint")
+                        except Exception as e:
+                            logging.warning(f"Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}")
+                    
                     self.best_meter_values[val_loss_key] = current_val_loss
                     self.best_val_loss = current_val_loss
                     
@@ -769,6 +822,12 @@ class Trainer:
                         logging.info(f"Saved new best validation checkpoint: {checkpoint_name}")
                     else:
                         logging.error(f"Failed to save best checkpoint: {checkpoint_path} does not exist after save_checkpoint call")
+
+                    if self.LoRA.use_lora and g_pathmgr.isdir(str(Path(checkpoint_path).stem + "_lora")):
+                        self.best_lora_checkpoint_path = str(Path(checkpoint_path).stem + "_lora")
+                        logging.info(f"Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}")
+                    else:
+                        logging.error(f"Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).stem + "_lora")} does not exist after save_checkpoint call")
                 else:
                     self.no_improvement_count += 1
                     logging.info(f"Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}")

@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from iopath.common.file_io import g_pathmgr
 from omegaconf import OmegaConf
+from pathlib import Path
 
 
 def multiply_all(*args):
@@ -286,11 +287,15 @@ class ProgressMeter:
         return "[" + fmt + "/" + fmt.format(num_batches) + "]"
 
 
-def get_resume_checkpoint(checkpoint_save_dir):
+def get_resume_checkpoint(checkpoint_save_dir, use_lora: bool):
     if not g_pathmgr.isdir(checkpoint_save_dir):
         return None
-    ckpt_file = os.path.join(checkpoint_save_dir, "checkpoint.pt")
-    if not g_pathmgr.isfile(ckpt_file):
-        return None
+    if not use_lora:
+        ckpt_file = list(Path(checkpoint_save_dir).glob("*.pt"))[0]
+        if not g_pathmgr.isfile(ckpt_file):
+            return None
+    else:
+        # Directory for Peft Lora
+        ckpt_file = list(Path(checkpoint_save_dir).glob("*_lora"))[0]
 
     return ckpt_file
