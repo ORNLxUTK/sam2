@@ -304,7 +304,7 @@ trainer:
         layer_decay_value: 0.9
         apply_to: 'image_encoder.trunk'
         overrides:
-          - pattern: '*pos_embed*'
+          - pattern: '*lora*'
             value: 1.0
 
     options:
@@ -318,7 +318,7 @@ trainer:
             start_value: ${scratch.vision_lr}
             end_value: ${divide:${scratch.vision_lr},10}
           param_names:
-            - '*image_encoder.*'
+            - '*lora*'
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
@@ -327,8 +327,8 @@ trainer:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
             value: 0.0
           param_names:
-            - '*bias*'
-          module_cls_names: ['torch.nn.LayerNorm']
+            - '*lora*'
+          #module_cls_names: []
 
   loss:
     all:

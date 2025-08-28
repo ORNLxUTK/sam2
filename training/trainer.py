@@ -332,12 +332,10 @@ class Trainer:
             self.model.register_comm_hook(process_group, hook)
 
     def _move_to_device(self):
-        logging.info(
-            f"Moving components to device {self.device} and local rank {self.local_rank}."
-        )
-
+        logging.info(f"Moving components to device {self.device} and local rank {self.local_rank}.")
+        
         self.model.to(self.device)
-
+        
         logging.info(
             f"Done moving components to device {self.device} and local rank {self.local_rank}."
         )
@@ -479,6 +477,7 @@ class Trainer:
                 target_modules="all-linear",
                 use_rslora=self.LoRA.use_rslora,
             ), adapter_name=self.LoRA.adapter_name)
+            
             print_model_summary(self.model)
 
     def _load_resuming_checkpoint(self, ckpt_path: str):
