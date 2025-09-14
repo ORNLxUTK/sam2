@@ -149,6 +149,12 @@ class LoRAConfig:
     use_rslora: bool = True
     adapter_name: str = "SAM2_LoRA"
 
+def mb(x): 
+    """
+    Convert bytes to mebibytes.
+    """
+    return x / (1024**2)
+
 
 class Trainer:
     """
@@ -162,7 +168,7 @@ class Trainer:
         *,  # the order of these args can change at any time, so they are keyword-only
         data: Dict[str, Any],
         model: Dict[str, Any],
-        logging: Dict[str, Any],
+        logging_conf: Dict[str, Any],
         checkpoint: Dict[str, Any],
         LoRA: Dict[str, Any],
         max_epochs: int,
@@ -184,7 +190,7 @@ class Trainer:
 
         self.data_conf = data
         self.model_conf = model
-        self.logging_conf = LoggingConf(**logging)
+        self.logging_conf = LoggingConf(**logging_conf)
         self.checkpoint_conf = CheckpointConf(**checkpoint).infer_missing()
         self.LoRA = LoRAConfig(**LoRA)
         self.max_epochs = max_epochs
@@ -243,8 +249,26 @@ class Trainer:
             barrier()
 
         self.load_checkpoint()
+
         self._construct_optimizers()
+        
+        # Model VRAM Parameters Usage
+        torch.cuda.empty_cache()
         self._move_to_device()
+        self.mem_model_only = torch.cuda.memory_allocated()
+        model_all_params_memory = sum(p.numel() * p.element_size() for p in self.model.parameters())
+        model_all_params_memory_mb = mb(model_all_params_memory)
+        model_trainable_params_memory = sum(p.numel() * p.element_size() for p in self.model.parameters() if p.requires_grad)
+        model_trainable_params_memory_mb = mb(model_trainable_params_memory)
+        model_non_trainable_params_memory = sum(p.numel() * p.element_size() for p in self.model.parameters() if not p.requires_grad)
+        model_non_trainable_params_memory_mb = mb(model_non_trainable_params_memory)
+        logging.info(f"{'Model':=^60}")
+        logging.info(f"Model Parameters Usage: {model_all_params_memory_mb:.2f} MB")
+        logging.info(f"Model Trainable Parameters Usage: {model_trainable_params_memory_mb:.2f} MB")
+        logging.info(f"Model Non-Trainable Parameters Usage: {model_non_trainable_params_memory_mb:.2f} MB")
+        logging.info(f"Model VRAM Usage: {mb(self.mem_model_only):.2f} MB")
+        logging.info(f"{'':=^60}")
+
         self._setup_ddp_distributed_training(distributed, accelerator)
         barrier()
 
@@ -520,12 +544,28 @@ class Trainer:
         phase: str,
     ):
 
+        torch.cuda.empty_cache()
+        self.mem_before_forward = torch.cuda.memory_allocated()
         outputs = model(batch)
+        self.mem_after_forward = torch.cuda.memory_allocated()
+        logging.info(f"{'Forward Pass':=^60}")
+        logging.info(f"Phase {phase} Before Forward Memory Usage: {mb(self.mem_before_forward):.2f} MB")
+        logging.info(f"Phase {phase} After Forward Memory Usage: {mb(self.mem_after_forward):.2f} MB")
+        logging.info(f"Phase {phase} Forward Memory Increase: {mb(self.mem_after_forward - self.mem_before_forward):.2f} MB")
+        logging.info(f"{'':=^60}")
         targets = batch.masks
         batch_size = len(batch.img_batch)
 
         key = batch.dict_key  # key for dataset
+        torch.cuda.empty_cache()
+        self.mem_before_loss = torch.cuda.memory_allocated()
         loss = self.loss[key](outputs, targets)
+        self.mem_after_loss = torch.cuda.memory_allocated()
+        logging.info(f"{'Loss Calculation':=^60}")
+        logging.info(f"Phase {phase} Before Loss Memory Usage: {mb(self.mem_before_loss):.2f} MB")
+        logging.info(f"Phase {phase} After Loss Memory Usage: {mb(self.mem_after_loss):.2f} MB")
+        logging.info(f"Phase {phase} Loss Memory Increase: {mb(self.mem_after_loss - self.mem_before_loss):.2f} MB")
+        logging.info(f"{'':=^60}")
         loss_str = f"Losses/{phase}_{key}_loss"
 
         loss_log_str = os.path.join("Step_Losses", loss_str)
@@ -706,7 +746,15 @@ class Trainer:
             # measure data loading time
             data_time.update(time.time() - end)
 
+            torch.cuda.empty_cache()
+            self.mem_before_val_batch = torch.cuda.memory_allocated()
             batch = batch.to(self.device, non_blocking=True)
+            self.mem_after_val_batch = torch.cuda.memory_allocated()
+            logging.info(f"{'Val Batch':=^60}")
+            logging.info(f"Memory Usage Before Batch: {mb(self.mem_before_val_batch):.2f} MB")
+            logging.info(f"Memory Usage After Batch: {mb(self.mem_after_val_batch):.2f} MB")
+            logging.info(f"Batch Memory Increase: {mb(self.mem_after_val_batch - self.mem_before_val_batch):.2f} MB")
+            logging.info(f"{'':=^60}")
 
             # compute output
             with torch.no_grad():
@@ -888,9 +936,17 @@ class Trainer:
             # measure data loading time
             data_time_meter.update(time.time() - end)
             data_times.append(data_time_meter.val)
+            torch.cuda.empty_cache()
+            self.mem_before_train_batch = torch.cuda.memory_allocated()
             batch = batch.to(
                 self.device, non_blocking=True
             )  # move tensors in a tensorclass
+            self.mem_with_train_batch = torch.cuda.memory_allocated()
+            logging.info(f"{'Train Batch':=^60}")
+            logging.info(f"Before Batch Memory Usage: {mb(self.mem_before_train_batch):.2f} MB")
+            logging.info(f"After Batch Memory Usage: {mb(self.mem_with_train_batch):.2f} MB")
+            logging.info(f"Batch Memory Increase: {mb(self.mem_with_train_batch - self.mem_before_train_batch):.2f} MB")
+            logging.info(f"{'':=^60}")
 
             try:
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)
@@ -935,8 +991,17 @@ class Trainer:
 
                 # Optimizer step: the scaler will make sure gradients are not
                 # applied if the gradients are infinite
+                torch.cuda.empty_cache()
+                self.mem_before_optimizer_step = torch.cuda.memory_allocated()
                 self.scaler.step(self.optim.optimizer)
                 self.scaler.update()
+                self.mem_after_optimizer_step = torch.cuda.memory_allocated()
+                logging.info(f"{'Optimizer Step':=^60}")
+                logging.info(f"Before Optimizer Step Memory Usage: {mb(self.mem_before_optimizer_step):.2f} MB")
+                logging.info(f"After Optimizer Step Memory Usage: {mb(self.mem_after_optimizer_step):.2f} MB")
+                logging.info(f"Optimizer Step Memory Increase: {mb(self.mem_after_optimizer_step - self.mem_before_optimizer_step):.2f} MB")
+                logging.info(f"{'':=^60}")
+
 
                 # measure elapsed time
                 batch_time_meter.update(time.time() - end)
@@ -1027,7 +1092,18 @@ class Trainer:
             else:
                 return
 
+        torch.cuda.empty_cache()
+        self.mem_before_backward = torch.cuda.memory_allocated()
         self.scaler.scale(loss).backward()
+        self.mem_after_backward = torch.cuda.memory_allocated()
+        gradient_memory = sum(p.grad.numel() * p.grad.element_size() for p in self.model.parameters() if p.grad is not None)
+        gradient_memory_mb = mb(gradient_memory)
+        logging.info(f"{'Backward Pass':=^60}")
+        logging.info(f"Phase {phase} Before Backward Memory Usage: {mb(self.mem_before_backward):.2f} MB")
+        logging.info(f"Phase {phase} After Backward Memory Usage: {mb(self.mem_after_backward):.2f} MB")
+        logging.info(f"Phase {phase} Backward Memory Increase: {mb(self.mem_after_backward - self.mem_before_backward):.2f} MB")
+        logging.info(f"Phase {phase} Gradient Memory Usage: {gradient_memory_mb:.2f} MB")
+        logging.info(f"{'':=^60}")
         loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
@@ -1176,12 +1252,21 @@ class Trainer:
         logging.info("Finished setting up components: Model, loss, optim, meters etc.")
 
     def _construct_optimizers(self):
+        torch.cuda.empty_cache()
+        self.mem_before_optimizer_init = torch.cuda.memory_allocated()
         self.optim = construct_optimizer(
             self.model,
             self.optim_conf.optimizer,
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
         )
+        self.mem_after_optimizer_init = torch.cuda.memory_allocated()
+        logging.info(f"{'Optimizer Init':=^60}")
+        logging.info(f"Memory Usage Before Optimizer Initialization: {mb(self.mem_before_optimizer_init):.2f} MB")
+        logging.info(f"Memory Usage After Optimizer Initialization: {mb(self.mem_after_optimizer_init):.2f} MB")
+        logging.info(f"Optimizer Initialization Memory Increase: {mb(self.mem_after_optimizer_init - self.mem_before_optimizer_init):.2f} MB")
+        logging.info(f"{'':=^60}")
+
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
         core_loss = loss.pop(CORE_LOSS_KEY)
