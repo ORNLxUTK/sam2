@@ -326,7 +326,8 @@ def construct_optimizer(
             overlap and cover all the model parameters.
     """
     if param_allowlist is None:
-        param_allowlist = {name for name, _ in model.named_parameters()}
+        param_allowlist = {name for name, _ in model.named_parameters() if "lora" in name}
+        logging.info(f"Param Allowlist: {param_allowlist}")
 
     named_parameters = {
         name: param

@@ -1259,6 +1259,7 @@ class Trainer:
             self.optim_conf.optimizer,
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
+            validate_param_groups=False,
         )
         self.mem_after_optimizer_init = torch.cuda.memory_allocated()
         logging.info(f"{'Optimizer Init':=^60}")
