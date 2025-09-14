@@ -1181,6 +1181,7 @@ class Trainer:
             self.optim_conf.optimizer,
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
+            validate_param_groups=False,
         )
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
