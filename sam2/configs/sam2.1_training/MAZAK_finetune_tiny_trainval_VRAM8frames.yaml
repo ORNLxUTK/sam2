@@ -394,5 +394,5 @@ submitit:
   cpus_per_task: 10
   use_cluster: true
   timeout_hour: 71
-  name: "VRAM8frames"
+  name: "VRAM8"
   port_range: [10000, 65000]
