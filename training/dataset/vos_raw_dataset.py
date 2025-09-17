@@ -13,6 +13,7 @@ from typing import List, Optional
 
 import pandas as pd
 import numpy as np
+from math import ceil
 
 import torch
 
@@ -92,7 +93,7 @@ class PNGRawDataset(VOSRawDataset):
 
         # Only create train/val split if not in train_only mode
         if self.split != "train_only":
-            num_val = int(num_sequences * self.val_ratio) 
+            num_val = ceil(num_sequences * self.val_ratio) 
             rng = np.random.RandomState(42)
             sequence_indices = rng.permutation(num_sequences)
             
