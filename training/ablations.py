@@ -6,6 +6,9 @@ from enum import Enum
 from typing import Dict, List, Tuple
 from rich import print
 from dataclasses import dataclass
+import subprocess
+import os
+import time
 
 BASE_CONFIGS = {
     "tiny" : "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/MAZAK_LoRA4_tiny.yaml",
@@ -112,9 +115,62 @@ def create_combinations() -> List[Combination]:
     combinations = [Combination(x[0], CHECKPOINT_PATHS[x[1]], DATASETS_PATHS[x[2]]) for x in combinations]
     return combinations
 
+def get_user_slurm_jobs():
+    """Get the number of queued/running jobs for the current user."""
+    try:
+        # Get current user
+        username = os.getenv('USER')
+        
+        # Run squeue to get job count
+        result = subprocess.run(['squeue', '-u', username, '-h'], 
+                              capture_output=True, text=True, check=True)
+        
+        # Count lines (each line is a job)
+        output_lines = result.stdout.strip()
+        if not output_lines:
+            return 0
+        
+        job_count = len([line for line in output_lines.split('\n') if line.strip()])
+        return job_count
+    except subprocess.CalledProcessError:
+        print("Warning: Could not check SLURM queue status")
+        return 0
+    except FileNotFoundError:
+        print("Warning: SLURM commands not available")
+        return 0
+
+def wait_for_job_slots(max_jobs=28, check_interval=60):
+    """Wait until there are fewer than max_jobs in the queue."""
+    while True:
+        current_jobs = get_user_slurm_jobs()
+        print(f"Current jobs in queue: {current_jobs}/{max_jobs}")
+        
+        if current_jobs < max_jobs:
+            print(f"Queue has space ({current_jobs}/{max_jobs}), proceeding...")
+            break
+        else:
+            print(f"Queue is full ({current_jobs}/{max_jobs}), waiting {check_interval} seconds...")
+            print(f"Check queue status with: squeue -u {os.getenv('USER')}")
+            time.sleep(check_interval)
+
+def submit_jobs(yaml_config_dir: Path) -> None:
+    for yaml_config in sorted(yaml_config_dir.glob("*.yaml")):
+        config = yaml_config.relative_to(yaml_config_dir.parent.parent.parent)
+        wait_for_job_slots(max_jobs=28, check_interval=60)
+        cmd = ["uv", "run", "--active", "training/train.py", "-c", str(config)]
+        try:
+            output: subprocess.CompletedProcess = subprocess.run(cmd, check=True, capture_output=True)
+            print(f"[green] Submitted job [/green] [blue]{yaml_config}[/blue]: [light_green]{output.stdout}[/light_green]")
+        except subprocess.CalledProcessError as e:
+            print(f"[red] Error submitting job [/red] [blue]{yaml_config}[/blue]: {e}")
+            print(f"[yellow] Output: [/yellow] {e.stdout}")
+            print(f"[red] Error: [/red] {e.stderr}")
 
 if __name__ == "__main__":
+    """
     config_combinations = create_combinations()
     print(f"Number of combinations: {len(config_combinations)}")
     for config in config_combinations:
         write_config(config, Path("/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/ablations"))
+    """
+    submit_jobs(Path("/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/ablations"))
