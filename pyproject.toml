@@ -1,38 +1,49 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "torch>=2.5.1",
+]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "SAM-2"
 version = "1.0"
 description = "SAM 2: Segment Anything in Images and Videos"
+readme = "README.md"
+requires-python = ">=3.10.0"
+license = {text = "Apache 2.0"}
 authors = [
-    {name = "Meta AI", email = "segment-anything@meta.com"},
+    {name = "Meta AI", email = "segment-anything@meta.com"}
 ]
+keywords = ["computer vision", "segmentation", "deep learning"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: Apache Software License",
+]
+
 dependencies = [
-    "hydra-core>=1.3.2",
-    "iopath>=0.1.10",
-    "numpy>=1.24.4",
-    "peft>=0.17.1",
-    "pillow>=9.4.0",
     "torch>=2.5.1",
     "torchvision>=0.20.1",
+    "numpy>=1.24.4",
     "tqdm>=4.66.1",
+    "hydra-core>=1.3.2",
+    "iopath>=0.1.10",
+    "pillow>=9.4.0",
 ]
-requires-python = ">=3.10.0"
-readme = "README.md"
-license = {text = "Apache 2.0"}
-
-[project.urls]
-Homepage = "https://github.com/facebookresearch/sam2"
 
 [project.optional-dependencies]
 notebooks = [
-    "eva-decord>=0.6.1",
-    "jupyter>=1.0.0",
     "matplotlib>=3.9.1",
+    "jupyter>=1.0.0",
     "opencv-python>=4.7.0",
+    "eva-decord>=0.6.1",
 ]
 interactive-demo = [
-    "Flask-Cors>=5.0.0",
     "Flask>=3.0.3",
+    "Flask-Cors>=5.0.0",
     "av>=13.0.0",
     "dataclasses-json>=0.6.7",
     "eva-decord>=0.6.1",
@@ -43,16 +54,24 @@ interactive-demo = [
 ]
 dev = [
     "black==24.2.0",
-    "fvcore>=0.1.5.post20221221",
-    "opencv-python>=4.7.0",
-    "pandas>=2.2.2",
-    "pycocotools>=2.0.8",
-    "scikit-image>=0.24.0",
-    "submitit>=1.5.1",
-    "tensorboard>=2.17.0",
-    "tensordict>=0.6.0",
-    "ufmt==2.0.0b2",
     "usort==1.0.2",
+    "ufmt==2.0.0b2",
+    "fvcore>=0.1.5.post20221221",
+    "pandas>=2.2.2",
+    "scikit-image>=0.24.0",
+    "tensorboard>=2.17.0",
+    "pycocotools>=2.0.8",
+    "tensordict>=0.6.0",
+    "opencv-python>=4.7.0",
+    "submitit>=1.5.1",
 ]
-[tool.pdm]
-distribution = false
+
+[project.urls]
+Homepage = "https://github.com/facebookresearch/sam2"
+Repository = "https://github.com/facebookresearch/sam2"
+
+[tool.setuptools.packages.find]
+exclude = ["notebooks"]
+
+[tool.setuptools.package-data]
+"*" = ["*"]
