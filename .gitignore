@@ -10,3 +10,4 @@ outputs/*
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
 sam2_logs/
+sam2/configs/sam2.1_training/LoRAcrossvalidation/
