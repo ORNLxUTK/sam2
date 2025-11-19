@@ -609,6 +609,7 @@ class Trainer:
             self.run_val()
         elif self.mode == "train_only":
             self.run_train()
+        logging.info("Training completed")
 
     def _setup_dataloaders(self):
         self.train_dataset = None
