@@ -87,6 +87,8 @@ def load_base_yaml(config_path: str) -> dict:
 
 def update_config(config: dict, config_combination: Combination) -> dict:
     config["scratch"]["resolution"] = config_combination.resolution
+    config["scratch"]["base_lr"] = 2e-5
+    config["scratch"]["vision_lr"] = 2e-5
     config["scratch"]["num_epochs"] = 200
     config["dataset"]["img_folder"] = config_combination.dataset["img_folder"]
     config["dataset"]["gt_folder"] = config_combination.dataset["gt_folder"]
