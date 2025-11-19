@@ -18,7 +18,7 @@ BASE_CONFIGS = {
 }
 
 DATASETS_PATHS: Dict[str, Dict[str, str]] = {}
-for dataset in Path("/lustre/isaac24/proj/UTK0388/SAM2images").iterdir():
+for dataset in Path("/lustre/isaac24/proj/UTK0388/SAM2imagescrossvalidation").iterdir():
     if dataset.is_dir():
         DATASETS_PATHS[dataset.name] = {
             "img_folder": str(dataset / "JPEGImages" / "train"),
@@ -65,6 +65,8 @@ class Combination:
         elif "visPOLYMER" in dataset_name:
             return 512
         elif "TIG" in dataset_name:
+            return 768
+        elif "PLASMA" in dataset_name:
             return 768
         else:
             raise ValueError(f"Dataset name {dataset_name} not found")
