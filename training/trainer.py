@@ -483,7 +483,6 @@ class Trainer:
                     lora_alpha=self.LoRA.r,
                     target_modules="all-linear",
                     use_rslora=self.LoRA.use_rslora,
-                    init_lora_weights="pissa",
                 ),
                 adapter_name=self.LoRA.adapter_name,
             )
