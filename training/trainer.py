@@ -142,6 +142,7 @@ class LoRAConfig:
     use_lora: bool = False
     r: int = 4
     use_rslora: bool = True
+    init_lora_weights: str | bool = True
     adapter_name: str = "SAM2_LoRA"
 
 
@@ -483,6 +484,7 @@ class Trainer:
                     lora_alpha=self.LoRA.r,
                     target_modules="all-linear",
                     use_rslora=self.LoRA.use_rslora,
+                    init_lora_weights=self.LoRA.init_lora_weights,
                 ),
                 adapter_name=self.LoRA.adapter_name,
             )

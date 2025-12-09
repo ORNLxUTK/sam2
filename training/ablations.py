@@ -89,6 +89,7 @@ def update_config(config: dict, config_combination: Combination) -> dict:
     config["scratch"]["resolution"] = config_combination.resolution
     config["scratch"]["base_lr"] = 2e-4
     config["scratch"]["vision_lr"] = 2e-4
+    config["trainer"]["LoRA"]["init_lora_weights"] = True
     config["scratch"]["num_epochs"] = 200
     config["dataset"]["img_folder"] = config_combination.dataset["img_folder"]
     config["dataset"]["gt_folder"] = config_combination.dataset["gt_folder"]
@@ -202,12 +203,12 @@ if __name__ == "__main__":
             write_config(
                 config,
                 Path(
-                    "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAcrossvalidation"
+                    "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAdefault_crossvalidation"
                 ),
             )
     if args.submit_jobs:
         submit_jobs(
             Path(
-                "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAcrossvalidation"
+                "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAdefault_crossvalidation"
             )
         )
