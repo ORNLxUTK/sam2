@@ -70,8 +70,6 @@ dev = [
 Homepage = "https://github.com/facebookresearch/sam2"
 Repository = "https://github.com/facebookresearch/sam2"
 
-[tool.setuptools.packages.find]
-exclude = ["notebooks"]
 
 [tool.setuptools.package-data]
 "*" = ["*"]
