@@ -70,6 +70,9 @@ dev = [
 Homepage = "https://github.com/facebookresearch/sam2"
 Repository = "https://github.com/facebookresearch/sam2"
 
+[tool.setuptools.packages.find]
+include = ["sam2", "training"]
+exclude = ["checkpoints", "sav_dataset"]
 
-[tool.setuptools.package-data]
-"*" = ["*"]
+
+
