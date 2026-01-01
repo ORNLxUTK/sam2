@@ -12,7 +12,7 @@ version = "1.0"
 description = "SAM 2: Segment Anything in Images and Videos"
 readme = "README.md"
 requires-python = ">=3.10.0"
-license = {text = "Apache 2.0"}
+license = "Apache-2.0"
 authors = [
     {name = "Meta AI", email = "segment-anything@meta.com"}
 ]
@@ -21,7 +21,6 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "License :: OSI Approved :: Apache Software License",
 ]
 
 dependencies = [
@@ -54,6 +53,7 @@ interactive-demo = [
 ]
 dev = [
     "black==24.2.0",
+    "ninja",
     "usort==1.0.2",
     "ufmt==2.0.0b2",
     "fvcore>=0.1.5.post20221221",
@@ -64,15 +64,26 @@ dev = [
     "tensordict>=0.6.0",
     "opencv-python>=4.7.0",
     "submitit>=1.5.1",
+    "modal>=1.3.0.post1",
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.128.0",
+    "peft>=0.18.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/facebookresearch/sam2"
 Repository = "https://github.com/facebookresearch/sam2"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
-include = ["sam2", "training"]
-exclude = ["checkpoints", "sav_dataset"]
+namespaces = false
+include = ["sam2*", "training*"]
+exclude = [
+    "sam2.configs*",
+    "sam2.csrc*",
+]
+
 
 
 
