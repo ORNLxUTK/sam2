@@ -54,6 +54,7 @@ interactive-demo = [
 dev = [
     "black==24.2.0",
     "ninja",
+    "aioboto3>=15.5.0",
     "usort==1.0.2",
     "ufmt==2.0.0b2",
     "fvcore>=0.1.5.post20221221",
