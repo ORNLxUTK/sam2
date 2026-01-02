@@ -10,17 +10,16 @@ import os
 import random
 import re
 from datetime import timedelta
+from pathlib import Path
 from typing import Optional
 
 import hydra
-
 import numpy as np
 import omegaconf
 import torch
 import torch.distributed as dist
 from iopath.common.file_io import g_pathmgr
 from omegaconf import OmegaConf
-from pathlib import Path
 
 
 def multiply_all(*args):
@@ -79,15 +78,20 @@ def setup_distributed_backend(backend, timeout_mins):
     return dist.get_rank()
 
 
+def cleanup_distributed_backend():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def get_machine_local_and_dist_rank():
     """
     Get the distributed and local rank of the current gpu.
     """
     local_rank = int(os.environ.get("LOCAL_RANK", None))
     distributed_rank = int(os.environ.get("RANK", None))
-    assert (
-        local_rank is not None and distributed_rank is not None
-    ), "Please the set the RANK and LOCAL_RANK environment variables."
+    assert local_rank is not None and distributed_rank is not None, (
+        "Please the set the RANK and LOCAL_RANK environment variables."
+    )
     return local_rank, distributed_rank
 
 
@@ -235,7 +239,7 @@ def human_readable_time(time_seconds):
     minutes, seconds = divmod(time, 60)
     hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
-    return f"{days:02}d {hours:02}h {minutes:02}m"
+    return f"{days:02}d {hours:02}h {minutes:02}m {seconds:02}s"
 
 
 class DurationMeter:

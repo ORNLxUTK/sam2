@@ -10,7 +10,6 @@ import logging
 import math
 import os
 import shutil
-import sys
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -41,13 +40,13 @@ from training.utils.train_utils import (
     MemMeter,
     Phase,
     ProgressMeter,
+    cleanup_distributed_backend,
     collect_dict_keys,
     get_amp_type,
     get_machine_local_and_dist_rank,
     get_resume_checkpoint,
     human_readable_time,
     is_dist_avail_and_initialized,
-    log_env_variables,
     makedir,
     set_seeds,
     setup_distributed_backend,
@@ -212,7 +211,7 @@ class Trainer:
         )
 
         set_seeds(seed_value, self.max_epochs, self.distributed_rank)
-        log_env_variables()
+        # log_env_variables()
 
         assert is_dist_avail_and_initialized(), (
             "Torch distributed needs to be initialized before calling the trainer."
@@ -532,8 +531,10 @@ class Trainer:
         outputs = model(batch)
         targets = batch.masks
         batch_size = len(batch.img_batch)
+        num_frames = batch.num_frames
+        num_videos = batch.num_videos
 
-        key = batch.dict_key  # key for dataset
+        key = batch.dict_key
         loss = self.loss[key](outputs, targets)
         loss_str = f"Losses/{phase}_{key}_loss"
 
@@ -545,6 +546,12 @@ class Trainer:
             step_losses.update(
                 {f"Losses/{phase}_{key}_{k}": v for k, v in loss.items()}
             )
+            step_losses.update(
+                {f"Avg_batch_loss_{key}_{k}": v / (num_frames) for k, v in loss.items()}
+            )
+            step_losses["Num Frames"] = torch.tensor(num_frames)
+            step_losses["Num Videos"] = torch.tensor(num_videos)
+            step_losses["Num Samples"] = torch.tensor(num_frames * num_videos)
             loss = self._log_loss_detailed_and_return_core_loss(
                 loss, loss_log_str, self.steps[phase]
             )
@@ -560,36 +567,14 @@ class Trainer:
 
         ret_tuple = {loss_str: loss}, batch_size, step_losses
 
-        if phase in self.meters and key in self.meters[phase]:
-            meters_dict = self.meters[phase][key]
-            if meters_dict is not None:
-                for _, meter in meters_dict.items():
-                    meter.update(
-                        find_stages=outputs,
-                        find_metadatas=batch.metadata,
-                    )
+        if phase in self.meters:
+            for _, meter in self.meters[phase].items():
+                meter.update(
+                    find_stages=outputs,
+                    find_metadatas=batch.metadata,
+                )
 
         return ret_tuple
-
-    def _terminate_training_job(self, reason="Training completed"):
-        """Terminate the training job by canceling the SLURM job"""
-        logging.info(f"{reason}. Initiating SLURM job cancellation.")
-
-        # Flush output streams
-        sys.stdout.flush()
-        sys.stderr.flush()
-
-        # Cancel the SLURM job
-        self._cancel_slurm_job()
-
-    def _cancel_slurm_job(self):
-        """Cancel the SLURM job if possible"""
-        slurm_job_id = os.environ.get("SLURM_JOB_ID")
-        if slurm_job_id:
-            logging.warning(f"Attempting to cancel SLURM job {slurm_job_id}")
-            os.system(f"scancel {slurm_job_id}")
-        else:
-            logging.warning("SLURM_JOB_ID not found. Unable to cancel SLURM job.")
 
     def run(self):
         assert self.mode in ["train", "train_only", "val"]
@@ -609,6 +594,7 @@ class Trainer:
             self.run_val()
         elif self.mode == "train_only":
             self.run_train()
+        cleanup_distributed_backend()
         logging.info("Training completed")
 
     def _setup_dataloaders(self):
@@ -650,12 +636,6 @@ class Trainer:
                 ) as f:
                     f.write(json.dumps(self.best_meter_values) + "\n")
 
-            if self.stop_training and self.distributed_rank == 0:
-                logging.info(f"Early stopping triggered at epoch {self.epoch}")
-                self._terminate_training_job(
-                    f"Early stopping triggered at epoch {self.epoch}"
-                )
-
             self.epoch += 1
         # epoch was incremented in the loop but the val step runs out of the loop
         self.epoch -= 1
@@ -687,10 +667,13 @@ class Trainer:
         curr_phases = [phase]
         curr_models = [self.model]
 
+        # Only create meters for loss keys that match the dict_keys used in this phase
+        val_dict_keys = collect_dict_keys(self.data_conf[phase])
         loss_names = []
         for p in curr_phases:
-            for key in self.loss.keys():
-                loss_names.append(f"Losses/{p}_{key}_loss")
+            for key in val_dict_keys:
+                if key in self.loss.keys():
+                    loss_names.append(f"Losses/{p}_{key}_loss")
 
         loss_mts = OrderedDict(
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
@@ -719,7 +702,8 @@ class Trainer:
 
             # compute output
             with torch.no_grad():
-                with torch.cuda.amp.autocast(
+                with torch.amp.autocast(
+                    device_type=self.device.type,
                     enabled=(self.optim_conf.amp.enabled if self.optim_conf else False),
                     dtype=(
                         get_amp_type(self.optim_conf.amp.amp_dtype)
@@ -882,6 +866,7 @@ class Trainer:
                         logging.info(
                             f"No improvement for {self.no_improvement_count} epochs, stopping training"
                         )
+                        logging.info(f"Early stopping triggered at epoch {self.epoch}")
                         self.stop_training = True
             else:
                 logging.info(
@@ -902,7 +887,7 @@ class Trainer:
         return {
             "Trainer/where": self.where,
             "Trainer/epoch": self.epoch,
-            f"Trainer/steps_{phase}": self.steps[phase],
+            f"Trainer/steps_(#batches_processed)_{phase}": self.steps[phase],
         }
 
     def train_epoch(self, train_loader):
@@ -915,9 +900,12 @@ class Trainer:
 
         iters_per_epoch = len(train_loader)
 
+        # Only create meters for loss keys that match the dict_keys used in this phase
+        train_dict_keys = collect_dict_keys(self.data_conf[phase])
         loss_names = []
-        for batch_key in self.loss.keys():
-            loss_names.append(f"Losses/{phase}_{batch_key}_loss")
+        for batch_key in train_dict_keys:
+            if batch_key in self.loss.keys():
+                loss_names.append(f"Losses/{phase}_{batch_key}_loss")
 
         loss_mts = OrderedDict(
             [(name, AverageMeter(name, self.device, ":.2e")) for name in loss_names]
@@ -1063,7 +1051,8 @@ class Trainer:
         # grads will also update a model even if the step doesn't produce
         # gradients
         self.optim.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(
+        with torch.amp.autocast(
+            device_type=self.device.type,
             enabled=self.optim_conf.amp.enabled,
             dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
         ):
