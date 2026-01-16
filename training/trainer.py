@@ -769,7 +769,7 @@ class Trainer:
 
         dist.barrier()
         if Phase.VAL in curr_phases and self.distributed_rank == 0:
-            val_loss_key = "Losses/val_val_loss"
+            val_loss_key = "Losses/val_valloss_loss"
             if val_loss_key in out_dict:
                 current_val_loss = out_dict[val_loss_key]
                 logging.info(
