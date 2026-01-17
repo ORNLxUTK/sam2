@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+import modal
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -171,10 +172,11 @@ class Trainer:
         optim_overrides: Optional[List[Dict[str, Any]]] = None,
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
+        modal_volume: Optional[modal.Volume] = None,
     ):
         self._setup_env_variables(env_variables)
         self._setup_timers()
-
+        self.modal_volume = modal_volume
         self.data_conf = data
         self.model_conf = model
         self.logging_conf = LoggingConf(**logging)
@@ -240,6 +242,8 @@ class Trainer:
         self._move_to_device()
         self._setup_ddp_distributed_training(distributed, accelerator)
         barrier()
+        if self.modal_volume is not None:
+            self.modal_volume.commit()
 
     def _setup_timers(self):
         """
@@ -627,7 +631,6 @@ class Trainer:
 
             if self.is_intermediate_val_epoch(self.epoch):
                 self.run_val()
-
             if self.distributed_rank == 0:
                 self.best_meter_values.update(self._get_trainer_state("train"))
                 with g_pathmgr.open(
@@ -637,6 +640,9 @@ class Trainer:
                     f.write(json.dumps(self.best_meter_values) + "\n")
 
             self.epoch += 1
+            if self.modal_volume is not None:
+                logging.info("Modal Volume commit: Epoch completed")
+                self.modal_volume.commit()
         # epoch was incremented in the loop but the val step runs out of the loop
         self.epoch -= 1
 

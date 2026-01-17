@@ -13,10 +13,8 @@ from argparse import ArgumentParser
 
 import submitit
 import torch
-
 from hydra import compose, initialize_config_module
 from hydra.utils import instantiate
-
 from iopath.common.file_io import g_pathmgr
 from omegaconf import OmegaConf
 
@@ -25,7 +23,7 @@ from training.utils.train_utils import makedir, register_omegaconf_resolvers
 os.environ["HYDRA_FULL_ERROR"] = "1"
 
 
-def single_proc_run(local_rank, main_port, cfg, world_size):
+def single_proc_run(local_rank, main_port, cfg, world_size, modal_volume=None):
     """Single GPU process"""
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(main_port)
@@ -37,11 +35,11 @@ def single_proc_run(local_rank, main_port, cfg, world_size):
     except Exception as e:
         logging.info(e)
 
-    trainer = instantiate(cfg.trainer, _recursive_=False)
+    trainer = instantiate(cfg.trainer, _recursive_=False, modal_volume=modal_volume)
     trainer.run()
 
 
-def single_node_runner(cfg, main_port: int):
+def single_node_runner(cfg, main_port: int, modal_volume=None):
     assert cfg.launcher.num_nodes == 1
     num_proc = cfg.launcher.gpus_per_node
     torch.multiprocessing.set_start_method(
@@ -50,10 +48,16 @@ def single_node_runner(cfg, main_port: int):
     if num_proc == 1:
         # directly call single_proc so we can easily set breakpoints
         # mp.spawn does not let us set breakpoints
-        single_proc_run(local_rank=0, main_port=main_port, cfg=cfg, world_size=num_proc)
+        single_proc_run(
+            local_rank=0,
+            main_port=main_port,
+            cfg=cfg,
+            world_size=num_proc,
+            modal_volume=modal_volume,
+        )
     else:
         mp_runner = torch.multiprocessing.start_processes
-        args = (main_port, cfg, num_proc)
+        args = (main_port, cfg, num_proc, modal_volume)
         # Note: using "fork" below, "spawn" causes time and error regressions. Using
         # spawn changes the default multiprocessing context to spawn, which doesn't
         # interact well with the dataloaders (likely due to the use of OpenCV).
@@ -190,9 +194,9 @@ def main(args) -> None:
             },
         }
         if "include_nodes" in submitit_conf:
-            assert (
-                len(submitit_conf["include_nodes"]) >= cfg.launcher.num_nodes
-            ), "Not enough nodes"
+            assert len(submitit_conf["include_nodes"]) >= cfg.launcher.num_nodes, (
+                "Not enough nodes"
+            )
             job_kwargs["slurm_additional_parameters"]["nodelist"] = " ".join(
                 submitit_conf["include_nodes"]
             )
@@ -241,7 +245,6 @@ def main(args) -> None:
 
 
 if __name__ == "__main__":
-
     initialize_config_module("sam2", version_base="1.2")
     parser = ArgumentParser()
     parser.add_argument(
