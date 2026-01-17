@@ -23,7 +23,7 @@ from training.utils.train_utils import makedir, register_omegaconf_resolvers
 os.environ["HYDRA_FULL_ERROR"] = "1"
 
 
-def single_proc_run(local_rank, main_port, cfg, world_size, modal_volume=None):
+def single_proc_run(local_rank, main_port, cfg, world_size):
     """Single GPU process"""
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(main_port)
@@ -35,11 +35,11 @@ def single_proc_run(local_rank, main_port, cfg, world_size, modal_volume=None):
     except Exception as e:
         logging.info(e)
 
-    trainer = instantiate(cfg.trainer, _recursive_=False, modal_volume=modal_volume)
-    trainer.run()
+    trainer = instantiate(cfg.trainer, _recursive_=False)
+    yield from trainer.run()
 
 
-def single_node_runner(cfg, main_port: int, modal_volume=None):
+def single_node_runner(cfg, main_port: int):
     assert cfg.launcher.num_nodes == 1
     num_proc = cfg.launcher.gpus_per_node
     torch.multiprocessing.set_start_method(
@@ -48,20 +48,21 @@ def single_node_runner(cfg, main_port: int, modal_volume=None):
     if num_proc == 1:
         # directly call single_proc so we can easily set breakpoints
         # mp.spawn does not let us set breakpoints
-        single_proc_run(
+        yield from single_proc_run(
             local_rank=0,
             main_port=main_port,
             cfg=cfg,
             world_size=num_proc,
-            modal_volume=modal_volume,
         )
     else:
         mp_runner = torch.multiprocessing.start_processes
-        args = (main_port, cfg, num_proc, modal_volume)
+        args = (main_port, cfg, num_proc)
         # Note: using "fork" below, "spawn" causes time and error regressions. Using
         # spawn changes the default multiprocessing context to spawn, which doesn't
         # interact well with the dataloaders (likely due to the use of OpenCV).
-        mp_runner(single_proc_run, args=args, nprocs=num_proc, start_method="spawn")
+        yield from mp_runner(
+            single_proc_run, args=args, nprocs=num_proc, start_method="spawn"
+        )
 
 
 def format_exception(e: Exception, limit=20):

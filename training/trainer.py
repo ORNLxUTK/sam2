@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-import modal
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -172,11 +171,9 @@ class Trainer:
         optim_overrides: Optional[List[Dict[str, Any]]] = None,
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
-        modal_volume: Optional[modal.Volume] = None,
     ):
         self._setup_env_variables(env_variables)
         self._setup_timers()
-        self.modal_volume = modal_volume
         self.data_conf = data
         self.model_conf = model
         self.logging_conf = LoggingConf(**logging)
@@ -242,8 +239,6 @@ class Trainer:
         self._move_to_device()
         self._setup_ddp_distributed_training(distributed, accelerator)
         barrier()
-        if self.modal_volume is not None:
-            self.modal_volume.commit()
 
     def _setup_timers(self):
         """
@@ -385,6 +380,7 @@ class Trainer:
         logging.info(f"Saving {len(checkpoint_paths)} checkpoint(s) for epoch {epoch}")
         for checkpoint_path in checkpoint_paths:
             logging.info(f"Saving checkpoint to: {checkpoint_path}")
+            yield f"data: {{'log': 'Saving checkpoint to: {checkpoint_path}'}}\n\n"
             self._save_checkpoint(
                 checkpoint,
                 checkpoint_path,
@@ -394,6 +390,7 @@ class Trainer:
                 ),
             )
             logging.info(f"Successfully saved checkpoint: {checkpoint_path}")
+            yield f"data: {{'log': 'Successfully saved checkpoint: {checkpoint_path}'}}\n\n"
 
     def _save_checkpoint(self, checkpoint, checkpoint_path, lora_path=None):
         """
@@ -589,17 +586,18 @@ class Trainer:
                 if self.is_intermediate_val_epoch(self.epoch - 1):
                     logging.info("Running previous val epoch")
                     self.epoch -= 1
-                    self.run_val()
+                    yield from self.run_val()
                     self.epoch += 1
-            self.run_train()
+            yield from self.run_train()
             if not self.stop_training:
-                self.run_val()
+                yield from self.run_val()
         elif self.mode == "val":
-            self.run_val()
+            yield from self.run_val()
         elif self.mode == "train_only":
-            self.run_train()
+            yield from self.run_train()
         cleanup_distributed_backend()
         logging.info("Training completed")
+        yield "data: {'log': 'Training completed'}\n\n"
 
     def _setup_dataloaders(self):
         self.train_dataset = None
@@ -615,7 +613,7 @@ class Trainer:
         while self.epoch < self.max_epochs and not self.stop_training:
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
             barrier()
-            outs = self.train_epoch(dataloader)
+            outs = yield from self.train_epoch(dataloader)
             self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
 
             # log train to text file.
@@ -630,7 +628,7 @@ class Trainer:
             gc.collect()
 
             if self.is_intermediate_val_epoch(self.epoch):
-                self.run_val()
+                yield from self.run_val()
             if self.distributed_rank == 0:
                 self.best_meter_values.update(self._get_trainer_state("train"))
                 with g_pathmgr.open(
@@ -640,9 +638,6 @@ class Trainer:
                     f.write(json.dumps(self.best_meter_values) + "\n")
 
             self.epoch += 1
-            if self.modal_volume is not None:
-                logging.info("Modal Volume commit: Epoch completed")
-                self.modal_volume.commit()
         # epoch was incremented in the loop but the val step runs out of the loop
         self.epoch -= 1
 
@@ -651,7 +646,7 @@ class Trainer:
             return
 
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
-        outs = self.val_epoch(dataloader, phase=Phase.VAL)
+        outs = yield from self.val_epoch(dataloader, phase=Phase.VAL)
         del dataloader
         gc.collect()
         self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
@@ -761,12 +756,12 @@ class Trainer:
                 dist.barrier()
 
         self.est_epoch_time[phase] = batch_time.avg * iters_per_epoch
-        self._log_timers(phase)
+        yield from self._log_timers(phase)
         for model in curr_models:
             if hasattr(unwrap_ddp_if_wrapped(model), "on_validation_epoch_end"):
                 unwrap_ddp_if_wrapped(model).on_validation_epoch_end()
 
-        out_dict = self._log_meters_and_save_best_ckpts(curr_phases)
+        out_dict = yield from self._log_meters_and_save_best_ckpts(curr_phases)
 
         for k, v in loss_mts.items():
             out_dict[k] = v.avg
@@ -781,11 +776,12 @@ class Trainer:
                 logging.info(
                     f"Using current epoch validation loss: {current_val_loss:.4f}"
                 )
-
+                yield f"data: {{'log': 'Using current epoch validation loss: {current_val_loss:.4f}'}}\n\n"
                 if current_val_loss < self.best_val_loss:
                     logging.info(
                         f"New best validation loss: {current_val_loss:.4f} (previous: {self.best_val_loss})"
                     )
+                    yield f"data: {{'log': 'New best validation loss: {current_val_loss:.4f} (previous: {self.best_val_loss})'}}\n\n"
 
                     # Remove previous best checkpoint if it exists
                     if self.best_checkpoint_path is not None and g_pathmgr.exists(
@@ -795,15 +791,17 @@ class Trainer:
                             logging.info(
                                 f"Removing previous best checkpoint: {self.best_checkpoint_path}"
                             )
+                            yield f"data: {{'log': 'Removing previous best checkpoint: {self.best_checkpoint_path}'}}\n\n"
                             g_pathmgr.rm(self.best_checkpoint_path)
                             logging.info(
                                 "Successfully removed previous best checkpoint"
                             )
+                            yield "data: {'log': 'Successfully removed previous best checkpoint'}\n\n"
                         except Exception as e:
                             logging.warning(
                                 f"Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}"
                             )
-
+                            yield f"data: {{'log': 'Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}'}}\n\n"
                     if (
                         self.LoRA.use_lora
                         and self.best_lora_checkpoint_path is not None
@@ -813,15 +811,17 @@ class Trainer:
                             logging.info(
                                 f"Removing previous best LoRA checkpoint: {self.best_lora_checkpoint_path}"
                             )
+                            yield f"data: {{'log': 'Removing previous best LoRA checkpoint: {self.best_lora_checkpoint_path}'}}\n\n"
                             shutil.rmtree(self.best_lora_checkpoint_path)
                             logging.info(
                                 "Successfully removed previous best LoRA checkpoint"
                             )
+                            yield "data: {'log': 'Successfully removed previous best LoRA checkpoint'}\n\n"
                         except Exception as e:
                             logging.warning(
                                 f"Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}"
                             )
-
+                            yield f"data: {{'log': 'Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}'}}\n\n"
                     self.best_meter_values[val_loss_key] = current_val_loss
                     self.best_val_loss = current_val_loss
 
@@ -831,7 +831,7 @@ class Trainer:
                     checkpoint_path = os.path.join(
                         self.checkpoint_conf.save_dir, f"{checkpoint_name}.pt"
                     )
-                    self.save_checkpoint(self.epoch, [checkpoint_name])
+                    yield from self.save_checkpoint(self.epoch, [checkpoint_name])
 
                     # Only update best_checkpoint_path if the checkpoint was actually saved
                     if g_pathmgr.exists(checkpoint_path):
@@ -841,11 +841,12 @@ class Trainer:
                         logging.info(
                             f"Saved new best validation checkpoint: {checkpoint_name}"
                         )
+                        yield f"data: {{'log': 'Saved new best validation checkpoint: {checkpoint_name}'}}\n\n"
                     else:
                         logging.error(
                             f"Failed to save best checkpoint: {checkpoint_path} does not exist after save_checkpoint call"
                         )
-
+                        yield f"data: {{'log': 'Failed to save best checkpoint: {checkpoint_path} does not exist after save_checkpoint call'}}\n\n"
                     if self.LoRA.use_lora and g_pathmgr.isdir(
                         str(
                             Path(checkpoint_path).parent
@@ -859,34 +860,41 @@ class Trainer:
                         logging.info(
                             f"Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}"
                         )
+                        yield f"data: {{'log': 'Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}'}}\n\n"
                     else:
                         logging.error(
                             f"Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + '_lora'))} does not exist after save_checkpoint call"
                         )
+                        yield f"data: {{'log': 'Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + '_lora'))} does not exist after save_checkpoint call'}}\n\n"
                 else:
                     self.no_improvement_count += 1
                     logging.info(
                         f"Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}"
                     )
+                    yield f"data: {{'log': 'Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}'}}\n\n"
                     if self.no_improvement_count >= 20:
                         logging.info(
                             f"No improvement for {self.no_improvement_count} epochs, stopping training"
                         )
+                        yield f"data: {{'log': 'Early stopping triggered at epoch {self.epoch}'}}\n\n"
                         logging.info(f"Early stopping triggered at epoch {self.epoch}")
+                        yield f"data: {{'log': 'Early stopping triggered at epoch {self.epoch}'}}\n\n"
                         self.stop_training = True
             else:
                 logging.info(
                     "No validation loss found in current epoch results for checkpointing"
                 )
+                yield "data: {'log': 'No validation loss found in current epoch results for checkpointing'}\n\n"
         else:
             logging.info(
                 f"No validation loss found because Phase.VAL = {Phase.VAL} or self.distributed_rank = {self.distributed_rank}"
             )
-
+            yield f"data: {{'log': 'No validation loss found because Phase.VAL = {Phase.VAL} or self.distributed_rank = {self.distributed_rank}'}}\n\n"
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
         self._reset_meters(curr_phases)
         logging.info(f"Meters: {out_dict}")
+        yield f"data: {{'log': 'Meters: {out_dict}'}}\n\n"
         return out_dict
 
     def _get_trainer_state(self, phase):
@@ -937,6 +945,7 @@ class Trainer:
 
         for data_iter, batch in enumerate(train_loader):
             # measure data loading time
+            yield f"data: {{'log': 'Batch [{data_iter + 1}/{iters_per_epoch}] Epoch [{self.epoch + 1}/{self.max_epochs}]'}}\n\n"
             data_time_meter.update(time.time() - end)
             data_times.append(data_time_meter.val)
             batch = batch.to(
@@ -1015,10 +1024,10 @@ class Trainer:
                 raise e
 
         self.est_epoch_time[Phase.TRAIN] = batch_time_meter.avg * iters_per_epoch
-        self._log_timers(Phase.TRAIN)
+        yield from self._log_timers(Phase.TRAIN)
         self._log_sync_data_times(Phase.TRAIN, data_times)
 
-        out_dict = self._log_meters_and_save_best_ckpts([Phase.TRAIN])
+        out_dict = yield from self._log_meters_and_save_best_ckpts([Phase.TRAIN])
 
         for k, v in loss_mts.items():
             out_dict[k] = v.avg
@@ -1027,6 +1036,7 @@ class Trainer:
 
         out_dict.update(self._get_trainer_state(phase))
         logging.info(f"Losses and meters: {out_dict}")
+        yield f"data: {{'log': 'Losses and meters: {out_dict}'}}\n\n"
         self._reset_meters([phase])
         return out_dict
 
@@ -1119,7 +1129,7 @@ class Trainer:
                         checkpoint_save_keys.append(tracked_meter_key.replace("/", "_"))
 
         if len(checkpoint_save_keys) > 0:
-            self.save_checkpoint(self.epoch, checkpoint_save_keys)
+            yield from self.save_checkpoint(self.epoch, checkpoint_save_keys)
 
         return out_dict
 
@@ -1151,6 +1161,7 @@ class Trainer:
         )
 
         logging.info(f"Estimated time remaining: {human_readable_time(time_remaining)}")
+        yield f"data: {{'log': 'Estimated time remaining: {human_readable_time(time_remaining)}'}}\n\n"
 
     def _reset_meters(self, phases: str) -> None:
         for meter in self._get_meters(phases).values():
