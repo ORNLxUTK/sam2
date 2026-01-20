@@ -150,14 +150,18 @@ def get_amp_type(amp_type: Optional[str] = None):
         return torch.float16
 
 
-def log_env_variables():
+def log_env_variables() -> str:
     env_keys = sorted(list(os.environ.keys()))
     st = ""
     for k in env_keys:
         v = os.environ[k]
         st += f"{k}={v}\n"
-    logging.info("Logging ENV_VARIABLES")
-    logging.info(st)
+    # logging.info("Logging ENV_VARIABLES")
+    # logging.info(st)
+    return f"""
+    Environment variables:
+    {st}
+    """
 
 
 class AverageMeter:

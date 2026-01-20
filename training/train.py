@@ -11,6 +11,7 @@ import sys
 import traceback
 from argparse import ArgumentParser
 
+import logfire
 import submitit
 import torch
 from hydra import compose, initialize_config_module
@@ -21,6 +22,8 @@ from omegaconf import OmegaConf
 from training.utils.train_utils import makedir, register_omegaconf_resolvers
 
 os.environ["HYDRA_FULL_ERROR"] = "1"
+
+logfire.configure(service_name="trainer")
 
 
 def single_proc_run(local_rank, main_port, cfg, world_size):
@@ -48,6 +51,7 @@ def single_node_runner(cfg, main_port: int):
     if num_proc == 1:
         # directly call single_proc so we can easily set breakpoints
         # mp.spawn does not let us set breakpoints
+        logfire.info("Running single process trainer")
         yield from single_proc_run(
             local_rank=0,
             main_port=main_port,
@@ -55,6 +59,7 @@ def single_node_runner(cfg, main_port: int):
             world_size=num_proc,
         )
     else:
+        logfire.info(f"Running multi-process trainer with {num_proc} GPUs")
         mp_runner = torch.multiprocessing.start_processes
         args = (main_port, cfg, num_proc)
         # Note: using "fork" below, "spawn" causes time and error regressions. Using

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+import logfire
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -47,12 +48,14 @@ from training.utils.train_utils import (
     get_resume_checkpoint,
     human_readable_time,
     is_dist_avail_and_initialized,
+    log_env_variables,
     makedir,
     set_seeds,
     setup_distributed_backend,
 )
 
 CORE_LOSS_KEY = "core_loss"
+logfire.configure(service_name="trainer")
 
 
 def unwrap_ddp_if_wrapped(model):
@@ -172,73 +175,77 @@ class Trainer:
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
     ):
-        self._setup_env_variables(env_variables)
-        self._setup_timers()
-        self.data_conf = data
-        self.model_conf = model
-        self.logging_conf = LoggingConf(**logging)
-        self.checkpoint_conf = CheckpointConf(**checkpoint).infer_missing()
-        self.LoRA = LoRAConfig(**LoRA)
-        self.max_epochs = max_epochs
-        self.mode = mode
-        self.val_epoch_freq = val_epoch_freq
-        self.optim_conf = OptimConf(**optim) if optim is not None else None
-        self.meters_conf = meters
-        self.loss_conf = loss
-        distributed = DistributedConf(**distributed or {})
-        cuda = CudaConf(**cuda or {})
-        self.where = 0.0
-        self.no_improvement_count = 0
-        self.stop_training = False
-        self.best_checkpoint_path = None
-        self.best_lora_checkpoint_path = None
-        self.best_val_loss = float("inf")
+        with logfire.span("Trainer Initialization"):
+            self._setup_env_variables(env_variables)
+            self._setup_timers()
+            self.data_conf = data
+            self.model_conf = model
+            self.logging_conf = LoggingConf(**logging)
+            self.checkpoint_conf = CheckpointConf(**checkpoint).infer_missing()
+            self.LoRA = LoRAConfig(**LoRA)
+            self.max_epochs = max_epochs
+            self.mode = mode
+            self.val_epoch_freq = val_epoch_freq
+            self.optim_conf = OptimConf(**optim) if optim is not None else None
+            self.meters_conf = meters
+            self.loss_conf = loss
+            distributed = DistributedConf(**distributed or {})
+            cuda = CudaConf(**cuda or {})
+            self.where = 0.0
+            self.no_improvement_count = 0
+            self.stop_training = False
+            self.best_checkpoint_path = None
+            self.best_lora_checkpoint_path = None
+            self.best_val_loss = float("inf")
 
-        self._infer_distributed_backend_if_none(distributed, accelerator)
+            self._infer_distributed_backend_if_none(distributed, accelerator)
 
-        self._setup_device(accelerator)
+            self._setup_device(accelerator)
 
-        self._setup_torch_dist_and_backend(cuda, distributed)
+            self._setup_torch_dist_and_backend(cuda, distributed)
 
-        makedir(self.logging_conf.log_dir)
-        setup_logging(
-            __name__,
-            output_dir=self.logging_conf.log_dir,
-            rank=self.rank,
-            log_level_primary=self.logging_conf.log_level_primary,
-            log_level_secondary=self.logging_conf.log_level_secondary,
-        )
-
-        set_seeds(seed_value, self.max_epochs, self.distributed_rank)
-        # log_env_variables()
-
-        assert is_dist_avail_and_initialized(), (
-            "Torch distributed needs to be initialized before calling the trainer."
-        )
-
-        self._setup_components()  # Except Optimizer everything is setup here.
-        self._setup_dataloaders()
-
-        self.time_elapsed_meter = DurationMeter("Time Elapsed", self.device, ":.2f")
-
-        # TODO: Make this section worth with or without LoRA
-        if self.checkpoint_conf.resume_from is not None:
-            assert os.path.exists(self.checkpoint_conf.resume_from), (
-                f"The 'resume_from' checkpoint {self.checkpoint_conf.resume_from} does not exist!"
+            makedir(self.logging_conf.log_dir)
+            setup_logging(
+                __name__,
+                output_dir=self.logging_conf.log_dir,
+                rank=self.rank,
+                log_level_primary=self.logging_conf.log_level_primary,
+                log_level_secondary=self.logging_conf.log_level_secondary,
             )
-            dst = os.path.join(self.checkpoint_conf.save_dir, "checkpoint.pt")
-            if self.distributed_rank == 0 and not os.path.exists(dst):
-                # Copy the "resume_from" checkpoint to the checkpoint folder
-                # if there is not a checkpoint to resume from already there
-                makedir(self.checkpoint_conf.save_dir)
-                g_pathmgr.copy(self.checkpoint_conf.resume_from, dst)
-            barrier()
 
-        self.load_checkpoint()
-        self._construct_optimizers()
-        self._move_to_device()
-        self._setup_ddp_distributed_training(distributed, accelerator)
-        barrier()
+            set_seeds(seed_value, self.max_epochs, self.distributed_rank)
+            logfire.info(log_env_variables())
+
+            assert is_dist_avail_and_initialized(), (
+                "Torch distributed needs to be initialized before calling the trainer."
+            )
+
+            with logfire.span("Setting up Components"):
+                self._setup_components()  # Except Optimizer everything is setup here.
+            with logfire.span("Setting up Dataloaders"):
+                self._setup_dataloaders()
+
+            self.time_elapsed_meter = DurationMeter("Time Elapsed", self.device, ":.2f")
+
+            # TODO: Make this section worth with or without LoRA
+            if self.checkpoint_conf.resume_from is not None:
+                assert os.path.exists(self.checkpoint_conf.resume_from), (
+                    f"The 'resume_from' checkpoint {self.checkpoint_conf.resume_from} does not exist!"
+                )
+                dst = os.path.join(self.checkpoint_conf.save_dir, "checkpoint.pt")
+                if self.distributed_rank == 0 and not os.path.exists(dst):
+                    # Copy the "resume_from" checkpoint to the checkpoint folder
+                    # if there is not a checkpoint to resume from already there
+                    makedir(self.checkpoint_conf.save_dir)
+                    g_pathmgr.copy(self.checkpoint_conf.resume_from, dst)
+                barrier()
+
+            self.load_checkpoint()
+            self._construct_optimizers()
+            self._move_to_device()
+            self._setup_ddp_distributed_training(distributed, accelerator)
+            barrier()
+            logfire.info("Trainer Initialized")
 
     def _setup_timers(self):
         """
@@ -401,37 +408,43 @@ class Trainer:
         We first save the new checkpoint to a temp file (with a '.tmp' suffix), and
         and move it to overwrite the old checkpoint_path.
         """
-        checkpoint_path_tmp = f"{checkpoint_path}.tmp"
-        with g_pathmgr.open(checkpoint_path_tmp, "wb") as f:
-            torch.save(checkpoint, f)
-            f.flush()
-            if hasattr(os, "sync"):
-                os.sync()
-            elif hasattr(os, "fsync"):
-                os.fsync(f.fileno())
-            else:
-                logging.warning("No sync method available for this platform")
-        # after torch.save is completed, replace the old checkpoint with the new one
-        if g_pathmgr.exists(checkpoint_path):
-            # remove the old checkpoint_path file first (otherwise g_pathmgr.mv fails)
-            g_pathmgr.rm(checkpoint_path)
-        success = g_pathmgr.mv(checkpoint_path_tmp, checkpoint_path)
-        assert success
+        with logfire.span("Saving Checkpoint"):
+            checkpoint_path_tmp = f"{checkpoint_path}.tmp"
+            with logfire.span("Saving Checkpoint to Temp File"):
+                with g_pathmgr.open(checkpoint_path_tmp, "wb") as f:
+                    torch.save(checkpoint, f)
+                    f.flush()
+                    if hasattr(os, "sync"):
+                        os.sync()
+                    elif hasattr(os, "fsync"):
+                        os.fsync(f.fileno())
+                    else:
+                        logging.warning("No sync method available for this platform")
+                # after torch.save is completed, replace the old checkpoint with the new one
+                with logfire.span("Replacing Old Checkpoint"):
+                    with logfire.span("Removing Old Checkpoint"):
+                        if g_pathmgr.exists(checkpoint_path):
+                            # remove the old checkpoint_path file first (otherwise g_pathmgr.mv fails)
+                            g_pathmgr.rm(checkpoint_path)
+                    with logfire.span("Moving Temp Checkpoint to Old Checkpoint"):
+                        success = g_pathmgr.mv(checkpoint_path_tmp, checkpoint_path)
+                        assert success
 
-        if lora_path is not None:
-            lora_path_tmp = f"{lora_path}.tmp"
-
-            unwrapped_model = unwrap_ddp_if_wrapped(self.model)
-
-            unwrapped_model.save_pretrained(
-                lora_path_tmp,
-                safe_serialization=True,
-                is_main_process=(self.distributed_rank == 0),
-            )
-            if g_pathmgr.exists(lora_path):
-                g_pathmgr.rm(lora_path)
-            success = g_pathmgr.mv(lora_path_tmp, lora_path)
-            assert success
+            if lora_path is not None:
+                lora_path_tmp = f"{lora_path}.tmp"
+                with logfire.span("Saving LoRA to Temp File"):
+                    unwrapped_model = unwrap_ddp_if_wrapped(self.model)
+                    unwrapped_model.save_pretrained(
+                        lora_path_tmp,
+                        safe_serialization=True,
+                        is_main_process=(self.distributed_rank == 0),
+                    )
+                with logfire.span("Removing Old LoRA"):
+                    if g_pathmgr.exists(lora_path):
+                        g_pathmgr.rm(lora_path)
+                with logfire.span("Moving Temp LoRA to Old LoRA"):
+                    success = g_pathmgr.mv(lora_path_tmp, lora_path)
+                    assert success
 
     def load_checkpoint(self):
         ckpt_path = get_resume_checkpoint(
@@ -597,6 +610,7 @@ class Trainer:
             yield from self.run_train()
         cleanup_distributed_backend()
         logging.info("Training completed")
+        logfire.info("Training completed 🥳")
         yield "data: {'log': 'Training completed'}\n\n"
 
     def _setup_dataloaders(self):
@@ -697,6 +711,7 @@ class Trainer:
 
         for data_iter, batch in enumerate(val_loader):
             # measure data loading time
+            logfire.info(f"Validation Batch [{data_iter + 1}/{iters_per_epoch}]")
             data_time.update(time.time() - end)
 
             batch = batch.to(self.device, non_blocking=True)
@@ -713,11 +728,12 @@ class Trainer:
                     ),
                 ):
                     for phase, model in zip(curr_phases, curr_models):
-                        loss_dict, batch_size, extra_losses = self._step(
-                            batch,
-                            model,
-                            phase,
-                        )
+                        with logfire.span("Validation Step"):
+                            loss_dict, batch_size, extra_losses = self._step(
+                                batch,
+                                model,
+                                phase,
+                            )
 
                         assert len(loss_dict) == 1
                         loss_key, loss = loss_dict.popitem()
@@ -777,12 +793,17 @@ class Trainer:
                     f"Using current epoch validation loss: {current_val_loss:.4f}"
                 )
                 yield f"data: {{'log': 'Using current epoch validation loss: {current_val_loss:.4f}'}}\n\n"
+                logfire.info(
+                    f"Using current epoch validation loss: {current_val_loss:.4f}"
+                )
                 if current_val_loss < self.best_val_loss:
                     logging.info(
-                        f"New best validation loss: {current_val_loss:.4f} (previous: {self.best_val_loss})"
+                        f"New best validation loss {current_val_loss:.4f} < previous best {self.best_val_loss:.4f}"
                     )
                     yield f"data: {{'log': 'New best validation loss: {current_val_loss:.4f} (previous: {self.best_val_loss})'}}\n\n"
-
+                    logfire.info(
+                        f"New best validation loss {current_val_loss:.4f} < previous best {self.best_val_loss:.4f}"
+                    )
                     # Remove previous best checkpoint if it exists
                     if self.best_checkpoint_path is not None and g_pathmgr.exists(
                         self.best_checkpoint_path
@@ -792,16 +813,25 @@ class Trainer:
                                 f"Removing previous best checkpoint: {self.best_checkpoint_path}"
                             )
                             yield f"data: {{'log': 'Removing previous best checkpoint: {self.best_checkpoint_path}'}}\n\n"
+                            logfire.info(
+                                f"Removing previous best checkpoint: {self.best_checkpoint_path}"
+                            )
                             g_pathmgr.rm(self.best_checkpoint_path)
                             logging.info(
                                 "Successfully removed previous best checkpoint"
                             )
                             yield "data: {'log': 'Successfully removed previous best checkpoint'}\n\n"
+                            logfire.info(
+                                "Successfully removed previous best checkpoint"
+                            )
                         except Exception as e:
                             logging.warning(
                                 f"Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}"
                             )
                             yield f"data: {{'log': 'Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}'}}\n\n"
+                            logfire.error(
+                                f"Failed to remove previous best checkpoint {self.best_checkpoint_path}: {e}"
+                            )
                     if (
                         self.LoRA.use_lora
                         and self.best_lora_checkpoint_path is not None
@@ -817,11 +847,17 @@ class Trainer:
                                 "Successfully removed previous best LoRA checkpoint"
                             )
                             yield "data: {'log': 'Successfully removed previous best LoRA checkpoint'}\n\n"
+                            logfire.info(
+                                "Successfully removed previous best LoRA checkpoint"
+                            )
                         except Exception as e:
                             logging.warning(
                                 f"Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}"
                             )
                             yield f"data: {{'log': 'Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}'}}\n\n"
+                            logfire.error(
+                                f"Failed to remove previous best LoRA checkpoint {self.best_lora_checkpoint_path}: {e}"
+                            )
                     self.best_meter_values[val_loss_key] = current_val_loss
                     self.best_val_loss = current_val_loss
 
@@ -861,35 +897,50 @@ class Trainer:
                             f"Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}"
                         )
                         yield f"data: {{'log': 'Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}'}}\n\n"
+                        logfire.info(
+                            f"Saved new best LoRA checkpoint: {self.best_lora_checkpoint_path}"
+                        )
                     else:
                         logging.error(
                             f"Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + '_lora'))} does not exist after save_checkpoint call"
                         )
                         yield f"data: {{'log': 'Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + '_lora'))} does not exist after save_checkpoint call'}}\n\n"
+                        logfire.error(
+                            f"Failed to save best LoRA checkpoint: {str(Path(checkpoint_path).parent / (Path(checkpoint_path).stem + '_lora'))} does not exist after save_checkpoint call"
+                        )
                 else:
                     self.no_improvement_count += 1
                     logging.info(
-                        f"Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}"
+                        f"Validation loss {current_val_loss:.4f} > previous best {self.best_val_loss:.4f}"
                     )
-                    yield f"data: {{'log': 'Validation loss {current_val_loss:.4f} not better than previous best {self.best_val_loss}'}}\n\n"
+                    yield f"data: {{'log': 'Validation loss {current_val_loss:.4f} > previous best {self.best_val_loss:.4f}'}}\n\n"
+                    logfire.info(
+                        f"Validation loss {current_val_loss:.4f} > previous best {self.best_val_loss:.4f}"
+                    )
                     if self.no_improvement_count >= 20:
                         logging.info(
                             f"No improvement for {self.no_improvement_count} epochs, stopping training"
                         )
                         yield f"data: {{'log': 'Early stopping triggered at epoch {self.epoch}'}}\n\n"
                         logging.info(f"Early stopping triggered at epoch {self.epoch}")
-                        yield f"data: {{'log': 'Early stopping triggered at epoch {self.epoch}'}}\n\n"
+                        logfire.info(f"Early stopping triggered at epoch {self.epoch}")
                         self.stop_training = True
             else:
                 logging.info(
                     "No validation loss found in current epoch results for checkpointing"
                 )
                 yield "data: {'log': 'No validation loss found in current epoch results for checkpointing'}\n\n"
+                logfire.info(
+                    "No validation loss found in current epoch results for checkpointing"
+                )
         else:
             logging.info(
                 f"No validation loss found because Phase.VAL = {Phase.VAL} or self.distributed_rank = {self.distributed_rank}"
             )
             yield f"data: {{'log': 'No validation loss found because Phase.VAL = {Phase.VAL} or self.distributed_rank = {self.distributed_rank}'}}\n\n"
+            logfire.info(
+                f"No validation loss found because Phase.VAL = {Phase.VAL} or self.distributed_rank = {self.distributed_rank}"
+            )
         for phase in curr_phases:
             out_dict.update(self._get_trainer_state(phase))
         self._reset_meters(curr_phases)
@@ -905,6 +956,7 @@ class Trainer:
         }
 
     def train_epoch(self, train_loader):
+        logfire.info(f"Training epoch {self.epoch + 1}/{self.max_epochs}")
         # Init stat meters
         batch_time_meter = AverageMeter("Batch Time", self.device, ":.2f")
         data_time_meter = AverageMeter("Data Time", self.device, ":.2f")
@@ -945,7 +997,10 @@ class Trainer:
 
         for data_iter, batch in enumerate(train_loader):
             # measure data loading time
-            yield f"data: {{'log': 'Batch [{data_iter + 1}/{iters_per_epoch}] Epoch [{self.epoch + 1}/{self.max_epochs}]'}}\n\n"
+            yield f"data: {{'log': 'Training Batch [{data_iter + 1}/{iters_per_epoch}] Training Epoch [{self.epoch + 1}/{self.max_epochs}]'}}\n\n"
+            logfire.info(
+                f"Training Batch [{data_iter + 1}/{iters_per_epoch}] Training Epoch [{self.epoch + 1}/{self.max_epochs}]"
+            )
             data_time_meter.update(time.time() - end)
             data_times.append(data_time_meter.val)
             batch = batch.to(
@@ -953,7 +1008,8 @@ class Trainer:
             )  # move tensors in a tensorclass
 
             try:
-                self._run_step(batch, phase, loss_mts, extra_loss_mts)
+                with logfire.span("Forward/Backward Pass"):
+                    self._run_step(batch, phase, loss_mts, extra_loss_mts)
 
                 # compute gradient and do optim step
                 exact_epoch = self.epoch + float(data_iter) / iters_per_epoch
@@ -995,8 +1051,10 @@ class Trainer:
 
                 # Optimizer step: the scaler will make sure gradients are not
                 # applied if the gradients are infinite
-                self.scaler.step(self.optim.optimizer)
-                self.scaler.update()
+                with logfire.span("Optimizer Step"):
+                    self.scaler.step(self.optim.optimizer)
+                with logfire.span("Scaler Update"):
+                    self.scaler.update()
 
                 # measure elapsed time
                 batch_time_meter.update(time.time() - end)
@@ -1036,6 +1094,7 @@ class Trainer:
 
         out_dict.update(self._get_trainer_state(phase))
         logging.info(f"Losses and meters: {out_dict}")
+        logfire.info(f"Losses and meters: {out_dict}")
         yield f"data: {{'log': 'Losses and meters: {out_dict}'}}\n\n"
         self._reset_meters([phase])
         return out_dict
@@ -1072,11 +1131,12 @@ class Trainer:
             enabled=self.optim_conf.amp.enabled,
             dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
         ):
-            loss_dict, batch_size, extra_losses = self._step(
-                batch,
-                self.model,
-                phase,
-            )
+            with logfire.span("Forward Pass"):
+                loss_dict, batch_size, extra_losses = self._step(
+                    batch,
+                    self.model,
+                    phase,
+                )
 
         assert len(loss_dict) == 1
         loss_key, loss = loss_dict.popitem()
@@ -1089,7 +1149,8 @@ class Trainer:
             else:
                 return
 
-        self.scaler.scale(loss).backward()
+        with logfire.span("Backward Pass"):
+            self.scaler.scale(loss).backward()
         loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
@@ -1161,6 +1222,7 @@ class Trainer:
         )
 
         logging.info(f"Estimated time remaining: {human_readable_time(time_remaining)}")
+        logfire.info(f"Estimated time remaining: {human_readable_time(time_remaining)}")
         yield f"data: {{'log': 'Estimated time remaining: {human_readable_time(time_remaining)}'}}\n\n"
 
     def _reset_meters(self, phases: str) -> None:
