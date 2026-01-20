@@ -250,7 +250,7 @@ trainer:
       collate_fn:
         _target_: training.utils.data_utils.collate_fn
         _partial_: true
-        dict_key: all
+        dict_key: trainloss
     val:  # Add this validation dataset configuration
       _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset
       phases_per_epoch: 1
@@ -282,7 +282,7 @@ trainer:
       collate_fn:
         _target_: training.utils.data_utils.collate_fn
         _partial_: true
-        dict_key: val
+        dict_key: valloss
 
   optim:
     amp:
@@ -330,7 +330,7 @@ trainer:
           #module_cls_names: []
 
   loss:
-    all:
+    trainloss:
       _target_: training.loss_fns.MultiStepMultiMasksAndIous
       weight_dict:
         loss_mask: 20
@@ -342,7 +342,7 @@ trainer:
       pred_obj_scores: true
       focal_gamma_obj_score: 0.0
       focal_alpha_obj_score: -1.0
-    val:
+    valloss:
       _target_: training.loss_fns.MultiStepMultiMasksAndIous
       weight_dict:
         loss_mask: 20
