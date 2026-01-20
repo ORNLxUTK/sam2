@@ -68,6 +68,7 @@ dev = [
     "modal>=1.3.0.post1",
     "fastapi[standard-no-fastapi-cloud-cli]>=0.128.0",
     "peft>=0.18.0",
+    "logfire"
 ]
 
 [project.urls]
