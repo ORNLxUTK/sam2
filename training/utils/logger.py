@@ -8,12 +8,10 @@
 import atexit
 import functools
 import logging
-import sys
 import uuid
 from typing import Any, Dict, Optional, Union
 
 from hydra.utils import instantiate
-
 from iopath.common.file_io import g_pathmgr
 from numpy import ndarray
 from torch import Tensor
@@ -216,15 +214,6 @@ def setup_logging(
     for h in logger.handlers:
         logger.removeHandler(h)
     logger.root.handlers = []
-
-    # setup the console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    if rank == 0:
-        console_handler.setLevel(log_level_primary)
-    else:
-        console_handler.setLevel(log_level_secondary)
 
     # we log to file as well if user wants
     if log_filename and rank == 0:
