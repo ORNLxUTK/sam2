@@ -34,6 +34,37 @@ CHECKPOINT_PATHS: Dict[str, str] = {
 
 LORA_RANKS: List[int] = [2, 4, 8, 16, 32]
 
+NORMALIZATION: Dict[str, Dict[str, List[float]]] = {
+    "MAZAK": {
+        "mean": [0.20048654, 0.19837238, 0.20657675],
+        "std": [0.11391094, 0.11692966, 0.11995319],
+    },
+    "irPOLYMER": {
+        "mean": [0.56605506, 0.5473264, 0.567643],
+        "std": [0.04377475, 0.04431006, 0.04109938],
+    },
+    "visPOLYMER": {
+        "mean": [0.40625536, 0.42121407, 0.4286662],
+        "std": [0.2051775, 0.19246738, 0.18674906],
+    },
+    "TIG": {
+        "mean": [0.07524887, 0.08645042, 0.06950404],
+        "std": [0.12010171, 0.1357605, 0.10954756],
+    },
+    "PLASMA": {
+        "mean": [0.08904004, 0.09290534, 0.09375972],
+        "std": [0.13393494, 0.13734882, 0.13757755],
+    },
+    "irPOLYMERglobalnorm": {
+        "mean": [0.35940748, 0.28585204, 0.36515528],
+        "std": [0.17419414, 0.1760542, 0.16343822],
+    },
+    "irPOLYMERglobaldepthnorm": {
+        "mean": [0.34871882, 0.18917786, 0.37597635],
+        "std": [0.26713312, 0.278611, 0.32556167],
+    },
+}
+
 
 @dataclass(frozen=True)
 class Combination:
@@ -104,6 +135,14 @@ def update_config(config: dict, config_combination: Combination) -> dict:
     config["submitit"]["name"] = (
         f"L{config_combination.rank}_{config_combination.datasetname[0]}_{config_combination.modelname[0]}"
     )
+    norm_key = config_combination.datasetname[:-2]
+    mean_list = NORMALIZATION[norm_key]["mean"]
+    std_list = NORMALIZATION[norm_key]["std"]
+
+    config["vos"]["train_transforms"][0]["transforms"][-1]["mean"] = mean_list.copy()
+    config["vos"]["train_transforms"][0]["transforms"][-1]["std"] = std_list.copy()
+    config["vos"]["val_transforms"][0]["transforms"][-1]["mean"] = mean_list.copy()
+    config["vos"]["val_transforms"][0]["transforms"][-1]["std"] = std_list.copy()
     return config
 
 
@@ -203,12 +242,12 @@ if __name__ == "__main__":
             write_config(
                 config,
                 Path(
-                    "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAdefault_crossvalidation"
+                    "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAdefault_crossvalidation_norm"
                 ),
             )
     if args.submit_jobs:
         submit_jobs(
             Path(
-                "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAdefault_crossvalidation"
+                "/lustre/isaac24/proj/UTK0388/DomainSpecific/sam2/sam2/configs/sam2.1_training/LoRAdefault_crossvalidation_norm"
             )
         )
