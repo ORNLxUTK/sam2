@@ -1,116 +1,316 @@
-# Training Code for SAM 2
+# SAM 2 Training Pipeline
 
-This folder contains the training code for SAM 2, a foundation model for promptable visual segmentation in images and videos. 
-The code allows users to train and fine-tune SAM 2 on their own datasets (image, video, or both).
+Training infrastructure for fine-tuning [SAM 2](https://github.com/facebookresearch/sam2) (Segment Anything Model 2) on domain-specific video segmentation datasets. Supports both **LoRA** (Low-Rank Adaptation) and **full fine-tuning** strategies, with distributed multi-GPU training via DDP.
 
-## Structure
+Developed by **ORNLxUTK** (Oak Ridge National Laboratory x MARCI Lab @ University of Tennessee, Knoxville) for additive manufacturing video segmentation of TIG, LWAM, PAW, and polymer (visible + infrared) datasets.
 
-The training code is organized into the following subfolders:
+## Quick Start
 
-* `dataset`: This folder contains image and video dataset and dataloader classes as well as their transforms.
-* `model`: This folder contains the main model class (`SAM2Train`) for training/fine-tuning. `SAM2Train` inherits from `SAM2Base` model and provides functions to enable training or fine-tuning SAM 2. It also accepts all training-time parameters used for simulating user prompts (e.g. iterative point sampling).
-* `utils`: This folder contains training utils such as loggers and distributed training utils.
-* `scripts`: This folder contains the script to extract the frames of SA-V dataset to be used in training.
-* `loss_fns.py`: This file has the main loss class (`MultiStepMultiMasksAndIous`) used for training.
-* `optimizer.py`:  This file contains all optimizer utils that support arbitrary schedulers.
-* `trainer.py`: This file contains the `Trainer` class that accepts all the `Hydra` configurable modules (model, optimizer, datasets, etc..) and implements the main train/eval loop.
-* `train.py`: This script is used to launch training jobs. It supports single and multi-node jobs. For usage, please check the [Getting Started](README.md#getting-started) section or run `python training/train.py -h`
+```bash
+# From the repository root (sam2/)
+uv sync
 
-## Getting Started
+# Launch LoRA training with a config
+uv run --active training/train.py \
+    -c sam2/configs/sam2.1_training/MAZAK_LoRA4_tiny.yaml
 
-To get started with the training code, we provide a simple example to fine-tune our checkpoints on [MOSE](https://henghuiding.github.io/MOSE/) dataset, which can be extended to your custom datasets.
+# Launch full fine-tuning
+uv run --active training/train.py \
+    -c sam2/configs/sam2.1_training/MAZAK_finetune_tiny.yaml
 
-#### Requirements:
-- We assume training on A100 GPUs with **80 GB** of memory.
-- Download the MOSE dataset using one of the provided links from [here](https://github.com/henghuiding/MOSE-api?tab=readme-ov-file#download).
+# Multi-GPU training
+python training/train.py \
+    -c sam2/configs/sam2.1_training/MAZAK_LoRA4_tiny.yaml \
+    --use-cluster 0 \
+    --num-gpus 4
+```
 
-#### Steps to fine-tune on MOSE:
-- Install the packages required for training by running `pip install -e ".[dev]"`.
-- Set the paths for MOSE dataset in `configs/sam2.1_training/sam2.1_hiera_b+_MOSE_finetune.yaml`.
-    ```yaml
-    dataset:
-        # PATHS to Dataset
-        img_folder: null # PATH to MOSE JPEGImages folder
-        gt_folder: null # PATH to MOSE Annotations folder
-        file_list_txt: null # Optional PATH to filelist containing a subset of videos to be used for training
-    ```
-- To fine-tune the base model on MOSE using 8 GPUs, run 
+For SLURM clusters:
+```bash
+python training/train.py \
+    -c sam2/configs/sam2.1_training/MAZAK_LoRA4_tiny.yaml \
+    --use-cluster 1 \
+    --num-gpus 4 \
+    --num-nodes 1 \
+    --partition $PARTITION \
+    --account $ACCOUNT
+```
 
-    ```python
-    python training/train.py \
-        -c configs/sam2.1_training/sam2.1_hiera_b+_MOSE_finetune.yaml \
-        --use-cluster 0 \
-        --num-gpus 8
-    ```
+## Directory Structure
 
-    We also support multi-node training on a cluster using [SLURM](https://slurm.schedmd.com/documentation.html), for example, you can train on 2 nodes by running
+```
+training/
+├── train.py                # Entry point (Hydra launcher, local or SLURM/submitit)
+├── trainer.py              # Core Trainer class (training loop, checkpointing, LoRA)
+├── optimizer.py            # Optimizer construction with per-param-group scheduling
+├── loss_fns.py             # Multi-step mask + IoU + dice loss functions
+├── ablations.py            # Config generator & SLURM job submitter for ablation experiments
+├── model/
+│   └── sam2.py             # SAM2Train (extends SAM2Base with training-specific logic)
+├── dataset/
+│   ├── sam2_datasets.py    # Dataset registration and construction
+│   ├── vos_dataset.py      # VOS (Video Object Segmentation) dataset class
+│   ├── vos_raw_dataset.py  # Raw dataset loaders (PNG, SA1B, JSON formats)
+│   ├── vos_sampler.py      # Frame sampling (RandomUniformSampler, EvalSampler)
+│   ├── vos_segment_loader.py  # Segment/mask loading
+│   ├── transforms.py       # Video-consistent data augmentation
+│   └── utils.py            # Dataset utilities
+├── utils/
+│   ├── train_utils.py      # Meters, checkpoint discovery, distributed setup
+│   ├── checkpoint_utils.py # Checkpoint save/load, parameter filtering
+│   ├── data_utils.py       # BatchedVideoDatapoint and collation
+│   ├── distributed.py      # Distributed training utilities
+│   └── logger.py           # Logging and TensorBoard integration
+├── scripts/
+│   └── sav_frame_extraction_submitit.py  # SA-V video frame extraction
+└── assets/
+    └── MOSE_sample_val_list.txt
+```
 
-    ```python
-    python training/train.py \
-        -c configs/sam2.1_training/sam2.1_hiera_b+_MOSE_finetune.yaml \
-        --use-cluster 1 \
-        --num-gpus 8 \
-        --num-nodes 2
-        --partition $PARTITION \
-        --qos $QOS \
-        --account $ACCOUNT
-    ```
-    where partition, qos, and account are optional and depend on your SLURM configuration.
-    By default, the checkpoint and logs will be saved under `sam2_logs` directory in the root of the repo. Alternatively, you can set the experiment log directory in the config file as follows:
-  
-    ```yaml
-      experiment_log_dir: null # Path to log directory, defaults to ./sam2_logs/${config_name}
-    ```
-    The training losses can be monitored using `tensorboard` logs stored under `tensorboard/` in the experiment log directory. We also provide a sample validation [split]( ../training/assets/MOSE_sample_val_list.txt) for evaluation purposes. To generate predictions, follow this [guide](../tools/README.md) on how to use our `vos_inference.py` script. After generating the predictions, you can run the `sav_evaluator.py` as detailed [here](../sav_dataset/README.md#sa-v-val-and-test-evaluation). The expected MOSE J&F after fine-tuning the Base plus model is 79.4.
-    
-    
-    After training/fine-tuning, you can then use the new checkpoint (saved in `checkpoints/` in the experiment log directory) similar to SAM 2 released checkpoints (as illustrated [here](../README.md#image-prediction)).
-## Training on images and videos
-The code supports training on images and videos (similar to how SAM 2 is trained). We provide classes for loading SA-1B as a sample image dataset, SA-V as a sample video dataset, as well as any DAVIS-style video dataset (e.g. MOSE). Note that to train on SA-V, you must first extract all videos to JPEG frames using the provided extraction [script](./scripts/sav_frame_extraction_submitit.py). Below is an example of how to setup the datasets in your config to train on a mix of image and video datasets:
+## Configuration
+
+Training uses [Hydra](https://hydra.cc/) for configuration. Config files live in `sam2/configs/sam2.1_training/`.
+
+### Config Naming Convention
+
+| Pattern | Example | Meaning |
+|---------|---------|---------|
+| `{DATASET}_LoRA{rank}_{size}.yaml` | `MAZAK_LoRA4_tiny.yaml` | LoRA rank 4, tiny model |
+| `{DATASET}_finetune_{size}.yaml` | `MAZAK_finetune_large.yaml` | Full fine-tune, large model |
+
+### Key Config Sections
 
 ```yaml
-data:
-  train:
-    _target_: training.dataset.sam2_datasets.TorchTrainMixedDataset 
-    phases_per_epoch: ${phases_per_epoch} # Chunks a single epoch into smaller phases
-    batch_sizes: # List of batch sizes corresponding to each dataset
-    - ${bs1} # Batch size of dataset 1
-    - ${bs2} # Batch size of dataset 2
-    datasets:
-    # SA1B as an example of an image dataset
-    - _target_: training.dataset.vos_dataset.VOSDataset
-      training: true
-      video_dataset:
-        _target_: training.dataset.vos_raw_dataset.SA1BRawDataset
-        img_folder: ${path_to_img_folder}
-        gt_folder: ${path_to_gt_folder}
-        file_list_txt: ${path_to_train_filelist} # Optional
-      sampler:
-        _target_: training.dataset.vos_sampler.RandomUniformSampler
-        num_frames: 1
-        max_num_objects: ${max_num_objects_per_image}
-      transforms: ${image_transforms}
-    # SA-V as an example of a video dataset
-    - _target_: training.dataset.vos_dataset.VOSDataset
-      training: true
-      video_dataset:
-        _target_: training.dataset.vos_raw_dataset.JSONRawDataset
-        img_folder: ${path_to_img_folder}
-        gt_folder: ${path_to_gt_folder}
-        file_list_txt: ${path_to_train_filelist} # Optional
-        ann_every: 4
-      sampler:
-        _target_: training.dataset.vos_sampler.RandomUniformSampler
-        num_frames: 8 # Number of frames per video
-        max_num_objects: ${max_num_objects_per_video}
-        reverse_time_prob: ${reverse_time_prob} # probability to reverse video
-      transforms: ${video_transforms}
-    shuffle: True
-    num_workers: ${num_train_workers}
-    pin_memory: True
-    drop_last: True
-    collate_fn:
-    _target_: training.utils.data_utils.collate_fn
-    _partial_: true
-    dict_key: all
+scratch:
+  resolution: 1024          # Input resolution (square crop)
+  train_batch_size: 1       # Per-GPU batch size
+  num_frames: 8             # Frames sampled per video clip
+  max_num_objects: 3         # Max tracked objects per clip
+  base_lr: 0.001            # Learning rate for encoder params
+  vision_lr: 0.001          # Learning rate for LoRA / vision params
+  num_epochs: 100
+
+dataset:
+  img_folder: /path/to/JPEGImages/train   # VOC-style image directory
+  gt_folder: /path/to/Annotations/train   # VOC-style mask directory
+
+trainer:
+  LoRA:
+    use_lora: true           # false for full fine-tuning
+    r: 4                     # LoRA rank (2, 4, 8, 16, 32)
+    use_rslora: true         # Rank-Stabilized LoRA scaling
+    adapter_name: "SAM2_LoRA_tiny"
 ```
+
+### Per-Dataset Resolution
+
+| Dataset | Resolution |
+|---------|-----------|
+| LWAM | 1024 |
+| TIG | 768 |
+| PLASMA | 768 |
+| visPOLYMER | 512 |
+| irPOLYMER | 256 |
+
+## Fine-Tuning Strategies
+
+### LoRA (Recommended for domain adaptation)
+
+Applies low-rank adapters to **all linear layers** across the entire SAM 2 model using the [PEFT](https://github.com/huggingface/peft) library.
+
+**How it works:**
+- PEFT's `get_peft_model()` wraps the model after pretrained weights are loaded
+- `target_modules="all-linear"` adds LoRA to every `nn.Linear` in the image encoder, memory attention, memory encoder, and mask decoder
+- `lora_alpha = r` with `use_rslora=True` for rank-stabilized scaling
+- Only LoRA parameters are optimized; base weights are frozen
+- Weight decay: 0.0 for LoRA params, 0.1 for others
+- Layer decay (0.9) on the image encoder backbone, overridden to 1.0 for LoRA params
+
+**Supported ranks:** 2, 4, 8, 16, 32
+
+### Full Fine-Tuning
+
+All model weights are updated. Set `trainer.LoRA.use_lora: false`. The optimizer will automatically include all trainable parameters.
+
+## Training Pipeline
+
+```
+1. Initialization
+   ├── Instantiate SAM 2 model (SAM2Train)
+   ├── Load SAM 2.1 pretrained checkpoint
+   └── (If LoRA) Wrap with PEFT get_peft_model()
+
+2. Training Loop (per epoch)
+   ├── Forward: multi-frame video clips with iterative point sampling
+   ├── Loss: focal + dice + IoU + classification (multi-step, multi-mask)
+   ├── Backward: AMP (bfloat16), gradient clipping (max_norm=0.1)
+   └── Optimizer step with cosine LR decay
+
+3. Validation (configurable frequency)
+   ├── Compute validation loss (no gradients)
+   ├── Track best checkpoint by validation loss
+   └── Early stopping after 20 epochs without improvement
+
+4. Checkpointing
+   ├── Regular: checkpoint.pt + checkpoint_lora/ (if LoRA)
+   └── Best: best_checkpoint_epoch_XXXX.pt + _lora/
+```
+
+## Checkpointing
+
+### LoRA Mode
+
+Checkpoints are split into two parts:
+
+| Component | Contents |
+|-----------|----------|
+| `.pt` file | Optimizer state, loss state, epoch, steps, best_val_loss, training metadata (**no model weights**) |
+| `_lora/` directory | LoRA adapter weights via PEFT `save_pretrained()` (safetensors format) |
+
+### Full Fine-Tune Mode
+
+The `.pt` file contains the full model state dict plus all training metadata.
+
+### Automatic Resume
+
+Training automatically discovers and resumes from the latest checkpoint in `save_dir`. To resume from a specific checkpoint, set:
+```yaml
+trainer:
+  checkpoint:
+    resume_from: /path/to/checkpoint.pt
+```
+
+## Loss Function
+
+`MultiStepMultiMasksAndIous` (in `loss_fns.py`) combines four loss terms:
+
+| Loss | Weight | Purpose |
+|------|--------|---------|
+| Focal loss | 20 | Pixel-level mask prediction (handles class imbalance) |
+| Dice loss | 1 | Region-level overlap |
+| IoU loss | 1 | Predicted vs. actual IoU regression |
+| Classification loss | 1 | Object presence score |
+
+The loss is computed across multiple iterative correction steps and selects the best mask channel from multi-mask outputs based on combined focal + dice loss.
+
+## Data Format
+
+### Expected Directory Layout
+
+```
+dataset_root/
+├── JPEGImages/
+│   └── train/
+│       └── video_name/
+│           ├── 00000.jpg
+│           ├── 00001.jpg
+│           └── ...
+└── Annotations/
+    └── train/
+        └── video_name/
+            ├── 00000.png   # Segmentation masks
+            ├── 00001.png
+            └── ...
+```
+
+Annotation masks are PNG images where each unique nonzero pixel value represents a different object. Background is 0.
+
+### Augmentation
+
+Video-consistent transforms (applied identically across all frames in a clip):
+- Random horizontal flip
+- Random affine (25 deg rotation, 20 deg shear)
+- Resize to target resolution (square)
+- Color jitter, random grayscale (5%)
+- ImageNet normalization (`mean=[0.485, 0.456, 0.406]`, `std=[0.229, 0.224, 0.225]`)
+
+## Ablation Experiments
+
+`ablations.py` generates configs and submits SLURM jobs for systematic experiments.
+
+**Experiment grid:**
+- LoRA ranks: [2, 4, 8, 16, 32]
+- Model sizes: tiny, small, base_plus, large
+- Datasets: LWAM, irPOLYMER, visPOLYMER, TIG, PLASMA (5-fold cross-validation each)
+
+```bash
+# Generate all YAML configs (ranks x sizes x datasets x folds)
+python training/ablations.py --create-configs
+
+# Submit SLURM jobs with automatic queue management (max 28 concurrent which was UTK ISAAC cluster limit at the time of development)
+python training/ablations.py --submit-jobs
+```
+
+## Model Architecture
+
+SAM 2 has four main components. When LoRA is enabled, adapters are added to all linear layers across all components.
+
+| Component | Role | Key Dimensions |
+|-----------|------|----------------|
+| **Image Encoder** | Hiera vision transformer backbone + FPN neck | embed_dim varies, neck d_model=256 |
+| **Memory Attention** | 4-layer cross-attention (RoPE) conditioning current frame on past frames | d_model=256 |
+| **Memory Encoder** | Mask downsampling + ConvNeXt fusion for memory storage | out_dim=64, 7 memory slots |
+| **Mask Decoder** | TwoWayTransformer + output MLPs for mask/IoU/score prediction | 8 heads, MLP dim=2048 |
+
+### Model Sizes
+
+| Size | Hiera embed_dim | Stages |
+|------|----------------|--------|
+| Tiny | 96 | [1, 2, 7, 2] |
+| Small | 96 | [1, 2, 11, 2] |
+| Base+ | 112 | [2, 5, 21, 3] |
+| Large | 144 | [2, 6, 36, 4] |
+
+## Distributed Training
+
+Multi-GPU training via PyTorch DDP with NCCL backend. Configured in the YAML:
+
+```yaml
+launcher:
+  num_nodes: 1
+  gpus_per_node: 4
+
+submitit:
+  partition: gpu
+  timeout_min: 4320   # 3 days
+```
+
+For SLURM clusters, uses [submitit](https://github.com/facebookincubator/submitit) for job submission. Single-node local training is also supported.
+
+## Dependencies
+
+Key dependencies (managed via `uv`, see `pyproject.toml`):
+
+| Package | Purpose |
+|---------|---------|
+| `peft >= 0.17.1` | LoRA adapters via Hugging Face PEFT |
+| `torch` | PyTorch framework |
+| `hydra-core` | Configuration management |
+| `iopath` | File I/O abstraction |
+| `tensorboard` | Training visualization |
+| `submitit` | SLURM job submission |
+
+## Monitoring
+
+Training metrics are logged to TensorBoard:
+```bash
+tensorboard --logdir sam2_logs/<config_name>/tensorboard/
+```
+
+Key metrics:
+- `Losses/train_*_loss` — per-step training losses
+- `Losses/val_*_loss` — validation losses
+- `Optim/*` — learning rate and weight decay schedules
+- `Step_Stats/*` — batch time, data loading time, memory usage
+
+## End-to-End Workflow
+
+```
+Raw Data
+  → Datasets/ (annotation conversion to VOC-style masks)
+  → DatasetVariants/ (cross-validation splits + preprocessing)
+  → training/ (this directory — SAM 2 fine-tuning)
+  → SAM2inference/ (inference + evaluation with DAVIS/VOS metrics)
+```
+
+See the parent repository's [README.md](../README.md) for the full, general SAM 2 pipeline overview.
