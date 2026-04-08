@@ -223,7 +223,6 @@ class Trainer:
 
         self.time_elapsed_meter = DurationMeter("Time Elapsed", self.device, ":.2f")
 
-        # TODO: Make this section worth with or without LoRA
         if self.checkpoint_conf.resume_from is not None:
             assert os.path.exists(self.checkpoint_conf.resume_from), (
                 f"The 'resume_from' checkpoint {self.checkpoint_conf.resume_from} does not exist!"
@@ -238,6 +237,9 @@ class Trainer:
 
         self.load_checkpoint()
         self._construct_optimizers()
+        if self._pending_optimizer_state is not None:
+            self.optim.optimizer.load_state_dict(self._pending_optimizer_state)
+            self._pending_optimizer_state = None
         self._move_to_device()
         self._setup_ddp_distributed_training(distributed, accelerator)
         barrier()
@@ -362,6 +364,8 @@ class Trainer:
             "time_elapsed": self.time_elapsed_meter.val,
             "best_meter_values": self.best_meter_values,
             "best_checkpoint_path": self.best_checkpoint_path,
+            "best_val_loss": self.best_val_loss,
+            "no_improvement_count": self.no_improvement_count,
         }
 
         if not self.LoRA.use_lora:
@@ -382,13 +386,15 @@ class Trainer:
         logging.info(f"Saving {len(checkpoint_paths)} checkpoint(s) for epoch {epoch}")
         for checkpoint_path in checkpoint_paths:
             logging.info(f"Saving checkpoint to: {checkpoint_path}")
+            lora_path = (
+                Path(checkpoint_path).parent / (Path(checkpoint_path).stem + "_lora")
+                if self.LoRA.use_lora
+                else None
+            )
             self._save_checkpoint(
                 checkpoint,
                 checkpoint_path,
-                lora_path=Path(checkpoint_path).parent
-                / (
-                    Path(checkpoint_path).stem + "_lora" if self.LoRA.use_lora else None
-                ),
+                lora_path=lora_path,
             )
             logging.info(f"Successfully saved checkpoint: {checkpoint_path}")
 
@@ -419,6 +425,7 @@ class Trainer:
         assert success
 
         if lora_path is not None:
+            lora_path = str(lora_path)
             lora_path_tmp = f"{lora_path}.tmp"
 
             unwrapped_model = unwrap_ddp_if_wrapped(self.model)
@@ -428,21 +435,34 @@ class Trainer:
                 safe_serialization=True,
                 is_main_process=(self.distributed_rank == 0),
             )
-            if g_pathmgr.exists(lora_path):
-                g_pathmgr.rm(lora_path)
-            success = g_pathmgr.mv(lora_path_tmp, lora_path)
-            assert success
+            if os.path.isdir(lora_path):
+                shutil.rmtree(lora_path)
+            shutil.move(lora_path_tmp, lora_path)
 
     def load_checkpoint(self):
-        ckpt_path = get_resume_checkpoint(
+        ckpt_result = get_resume_checkpoint(
             self.checkpoint_conf.save_dir, self.LoRA.use_lora
         )
-        if ckpt_path is None:
+        if ckpt_result is None:
             self._init_model_state()
+            self._pending_optimizer_state = None
         else:
-            if self.checkpoint_conf.initialize_after_preemption:
+            if self.LoRA.use_lora:
+                pt_path, lora_path = ckpt_result
+            else:
+                pt_path = ckpt_result
+                lora_path = None
+
+            if lora_path is not None:
+                # For LoRA resume: load pretrained base weights first, then
+                # PeftModel.from_pretrained will apply the saved LoRA adapter.
+                # skip_lora=True prevents get_peft_model from being called here
+                # since from_pretrained handles LoRA wrapping.
+                self._call_model_initializer(skip_lora=True)
+            elif self.checkpoint_conf.initialize_after_preemption:
                 self._call_model_initializer()
-            self._load_resuming_checkpoint(ckpt_path)
+
+            self._load_resuming_checkpoint(pt_path, lora_path)
 
     def _init_model_state(self):
         # Checking that parameters that won't be saved are indeed frozen
@@ -465,7 +485,7 @@ class Trainer:
         ):
             self._call_model_initializer()
 
-    def _call_model_initializer(self):
+    def _call_model_initializer(self, skip_lora=False):
         model_weight_initializer = instantiate(
             self.checkpoint_conf.model_weight_initializer
         )
@@ -475,7 +495,7 @@ class Trainer:
             )
             self.model = model_weight_initializer(model=self.model)
 
-        if self.LoRA.use_lora:
+        if self.LoRA.use_lora and not skip_lora:
             self.model = get_peft_model(
                 self.model,
                 LoraConfig(
@@ -489,11 +509,12 @@ class Trainer:
 
             print_model_summary(self.model)
 
-    def _load_resuming_checkpoint(self, ckpt_path: str):
-        logging.info(f"Resuming training from {ckpt_path}")
+    def _load_resuming_checkpoint(self, pt_path, lora_path=None):
+        logging.info(f"Resuming training from {pt_path}")
 
-        with g_pathmgr.open(ckpt_path, "rb") as f:
+        with g_pathmgr.open(str(pt_path), "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
+
         if not self.LoRA.use_lora:
             load_state_dict_into_model(
                 model=self.model,
@@ -501,12 +522,17 @@ class Trainer:
                 ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
             )
         else:
+            assert lora_path is not None, (
+                "LoRA is enabled but no LoRA checkpoint directory was found"
+            )
+            logging.info(f"Loading LoRA adapter from {lora_path}")
             self.model = PeftModel.from_pretrained(
-                self.model, model_id=ckpt_path, is_trainable=True
+                self.model, model_id=str(lora_path), is_trainable=True
             )
             print_model_summary(self.model)
 
-        self.optim.optimizer.load_state_dict(checkpoint["optimizer"])
+        # Defer optimizer state loading until after _construct_optimizers
+        self._pending_optimizer_state = checkpoint.get("optimizer")
         self.loss.load_state_dict(checkpoint["loss"], strict=True)
         self.epoch = checkpoint["epoch"]
         self.steps = checkpoint["steps"]
@@ -517,6 +543,8 @@ class Trainer:
 
         self.best_meter_values = checkpoint.get("best_meter_values", {})
         self.best_checkpoint_path = checkpoint.get("best_checkpoint_path", None)
+        self.best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+        self.no_improvement_count = checkpoint.get("no_improvement_count", 0)
 
         if "train_dataset" in checkpoint and self.train_dataset is not None:
             self.train_dataset.load_checkpoint_state(checkpoint["train_dataset"])

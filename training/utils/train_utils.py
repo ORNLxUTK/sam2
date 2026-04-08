@@ -288,14 +288,29 @@ class ProgressMeter:
 
 
 def get_resume_checkpoint(checkpoint_save_dir, use_lora: bool):
+    """
+    Returns the checkpoint path(s) for resuming training.
+
+    When use_lora=False: returns the .pt file path, or None if not found.
+    When use_lora=True: returns a tuple (pt_path, lora_dir_path), or None if not found.
+    """
     if not g_pathmgr.isdir(checkpoint_save_dir):
         return None
-    if not use_lora:
-        ckpt_file = list(Path(checkpoint_save_dir).glob("*.pt"))[0]
-        if not g_pathmgr.isfile(ckpt_file):
-            return None
-    else:
-        # Directory for Peft Lora
-        ckpt_file = list(Path(checkpoint_save_dir).glob("*_lora"))[0]
 
-    return ckpt_file
+    pt_files = sorted(Path(checkpoint_save_dir).glob("*.pt"))
+    if not pt_files:
+        return None
+
+    pt_path = pt_files[0]
+    if not g_pathmgr.isfile(str(pt_path)):
+        return None
+
+    if not use_lora:
+        return pt_path
+
+    # For LoRA, also need the adapter directory
+    lora_dirs = sorted(Path(checkpoint_save_dir).glob("*_lora"))
+    if not lora_dirs:
+        return None
+
+    return (pt_path, lora_dirs[0])
